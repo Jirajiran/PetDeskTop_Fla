@@ -1,0 +1,64 @@
+{
+  "name": "ocpet",
+  "version": "32.0.0",
+  "description": "OCPet Desktop Pet — Ver32 AI stages",
+  "main": "main.js",
+  "author": "OCPet",
+  "scripts": {
+    "start": "electron .",
+    "sync-release": "node scripts/sync-release-source.js",
+    "dist": "npm run sync-release && electron-builder --win",
+    "dist:portable": "npm run sync-release && electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.ocpet.desktop",
+    "productName": "OCPet",
+    "copyright": "Copyright © OCPet",
+    "directories": {
+      "output": "release/installer",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "pet.js",
+      "index.html",
+      "style.css",
+      "PetPicture/**/*",
+      "Sound/**/*"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "OCPet-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "shortcutName": "OCPet",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "installerLanguages": [
+        "th_TH",
+        "en_US"
+      ],
+      "language": "1054"
+    }
+  }
+}
