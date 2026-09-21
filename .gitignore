@@ -1,20 +1,17 @@
-# Dependencies (reinstall with: npm install)
-node_modules/
+# Dependencies (reinstall with: npm install inside source/)
+source/node_modules/
 
 # Electron / electron-builder output
-release/installer/win-unpacked/
-release/installer/.icon-ico/
-release/installer/*.blockmap
-release/installer/builder-debug.yml
-release/installer/__uninstaller-*
+installer/win-unpacked/
+installer/.icon-ico/
+installer/*.blockmap
+installer/builder-debug.yml
+installer/__uninstaller-*
 dist/
 out/
 
 # Keep Setup .exe out of git — attach on GitHub Releases instead
-release/installer/*.exe
-
-# Optional synced copy (regenerate: npm run sync-release)
-release/source/
+installer/*.exe
 
 # Logs / OS junk
 *.log
