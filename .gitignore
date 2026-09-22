@@ -1,17 +1,14 @@
 # Dependencies (reinstall with: npm install inside source/)
 source/node_modules/
 
-# Electron / electron-builder output
-installer/win-unpacked/
-installer/.icon-ico/
-installer/*.blockmap
-installer/builder-debug.yml
-installer/__uninstaller-*
+# electron-builder junk (NOT the Setup .exe — Setup is committed on purpose)
+win-unpacked/
+.icon-ico/
+*.blockmap
+builder-debug.yml
+__uninstaller-*
 dist/
 out/
-
-# Keep Setup .exe out of git — attach on GitHub Releases instead
-installer/*.exe
 
 # Logs / OS junk
 *.log

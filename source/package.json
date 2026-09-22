@@ -18,7 +18,7 @@
     "productName": "OCPet",
     "copyright": "Copyright © OCPet",
     "directories": {
-      "output": "../installer",
+      "output": "..",
       "buildResources": "build"
     },
     "files": [

@@ -5,5 +5,5 @@ OCPet — Source (ไฟล์รัน/พัฒนา)
   npm install
   npm start
 
-สร้าง Setup .exe → ไปที่ ../installer/
+สร้าง Setup .exe → ไปที่รากโปรเจกต์ (../OCPet-Setup-*.exe)
   npm run dist
