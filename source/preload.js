@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('petAPI', {
   exitDragMode: () => ipcRenderer.invoke('exit-drag-mode'),
   setStartup: (enabled) => ipcRenderer.invoke('set-startup', enabled),
   getStartup: () => ipcRenderer.invoke('get-startup'),
+  quitApp: () => ipcRenderer.invoke('quit-app'),
   snooze: (ms) => ipcRenderer.invoke('snooze', ms),
   restoreWindowShell: () => ipcRenderer.invoke('restore-window-shell'),
   onScreenChanged: (callback) => {

@@ -1,9 +1,9 @@
 {
-  "name": "ocpet",
+  "name": "fla-pet-desktop",
   "version": "32.0.0",
-  "description": "OCPet Desktop Pet — Ver32 AI stages",
+  "description": "Fla_petDesktop_V32 — desktop pet",
   "main": "main.js",
-  "author": "OCPet",
+  "author": "Fla",
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --win",
@@ -14,9 +14,9 @@
     "electron-builder": "^25.1.8"
   },
   "build": {
-    "appId": "com.ocpet.desktop",
-    "productName": "OCPet",
-    "copyright": "Copyright © OCPet",
+    "appId": "com.fla.petdesktop",
+    "productName": "Fla_petDesktop_V32",
+    "copyright": "Copyright © Fla",
     "directories": {
       "output": "..",
       "buildResources": "build"
@@ -41,7 +41,7 @@
         }
       ],
       "icon": "build/icon.png",
-      "artifactName": "OCPet-Setup-${version}.${ext}"
+      "artifactName": "Fla_petDesktop_V32-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -50,9 +50,10 @@
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",
-      "shortcutName": "OCPet",
+      "shortcutName": "Fla_petDesktop_V32",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
+      "runAfterFinish": true,
       "installerLanguages": [
         "th_TH",
         "en_US"

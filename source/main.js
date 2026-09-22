@@ -6,9 +6,13 @@ const {
   Tray,
   Menu,
   nativeImage,
+  shell,
+  dialog,
 } = require('electron');
 const path = require('path');
+const fs = require('fs');
 
+const APP_NAME = 'Fla_petDesktop_V32';
 const APP_VERSION = '32.0.0';
 const PET_SIZE = 72;
 const WINDOW_WIDTH = 88;
@@ -18,10 +22,25 @@ const ALWAYS_ON_TOP_LEVEL = 'screen-saver';
 let mainWindow = null;
 let tray = null;
 let snoozeTimer = null;
+let snoozeResolve = null;
 let dragMoveListener = null;
+/** Soft-hide: opacity 0 + bottom layer (window stays alive, not BrowserWindow.hide). */
+let petVisuallyHidden = false;
+
+function clearSnoozeWait() {
+  if (snoozeTimer) {
+    clearTimeout(snoozeTimer);
+    snoozeTimer = null;
+  }
+  if (snoozeResolve) {
+    const resolve = snoozeResolve;
+    snoozeResolve = null;
+    resolve();
+  }
+}
 
 function logMain(context, err) {
-  console.error(`[OCPet v${APP_VERSION} Main] ${context}:`, err);
+  console.error(`[${APP_NAME} v${APP_VERSION} Main] ${context}:`, err);
 }
 
 process.on('uncaughtException', (err) => logMain('uncaughtException', err));
@@ -38,7 +57,22 @@ function getWorkArea() {
 
 function applyAlwaysOnTop(win) {
   if (!win || win.isDestroyed()) return;
+  if (petVisuallyHidden) return;
   win.setAlwaysOnTop(true, ALWAYS_ON_TOP_LEVEL);
+}
+
+function applyHiddenVisual(win) {
+  if (!win || win.isDestroyed()) return;
+  win.setOpacity(0);
+  win.setIgnoreMouseEvents(true);
+  win.setAlwaysOnTop(false);
+}
+
+function applyVisibleVisual(win) {
+  if (!win || win.isDestroyed()) return;
+  win.setIgnoreMouseEvents(false);
+  win.setOpacity(1);
+  applyAlwaysOnTop(win);
 }
 
 function restorePetWindowShell(win) {
@@ -54,8 +88,10 @@ function restorePetWindowShell(win) {
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   }
 
-  win.setAlwaysOnTop(false);
-  win.setAlwaysOnTop(true, ALWAYS_ON_TOP_LEVEL);
+  if (!petVisuallyHidden) {
+    win.setAlwaysOnTop(false);
+    win.setAlwaysOnTop(true, ALWAYS_ON_TOP_LEVEL);
+  }
 }
 
 function restorePetWindowBounds(win) {
@@ -203,23 +239,41 @@ function exitDragMode(win) {
 
 function hidePetWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  // Soft-hide: keep process + window alive; only hide visually and block hits.
+  petVisuallyHidden = true;
   mainWindow.webContents.send('pet-visibility', false);
-  mainWindow.hide();
+
+  if (!mainWindow.isVisible()) {
+    mainWindow.showInactive();
+  }
+  applyHiddenVisual(mainWindow);
 }
 
 function showPetWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
+  // Resolve any snooze waiter (tray show or timer) before restoring UI.
+  clearSnoozeWait();
+
+  petVisuallyHidden = false;
+
+  if (!mainWindow.isVisible()) {
+    mainWindow.showInactive();
+  }
+
   restorePetWindowShell(mainWindow);
-  mainWindow.showInactive();
-  restorePetWindow(mainWindow);
+  applyVisibleVisual(mainWindow);
+  restorePetWindowBounds(mainWindow);
 
   setTimeout(() => {
-    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
-      restorePetWindow(mainWindow);
+    if (mainWindow && !mainWindow.isDestroyed() && !petVisuallyHidden) {
+      applyVisibleVisual(mainWindow);
+      restorePetWindowBounds(mainWindow);
     }
   }, 50);
 
+  // Same reverse path: opacity + layer first, then resume stages in renderer.
   mainWindow.webContents.send('pet-visibility', true);
   mainWindow.webContents.send('screen-changed');
 }
@@ -310,6 +364,48 @@ function createTray() {
   updateTrayMenu();
 }
 
+function launchUninstaller() {
+  if (!app.isPackaged) {
+    dialog.showMessageBox({
+      type: 'info',
+      title: APP_NAME,
+      message: 'ถอนการติดตั้งใช้ได้เฉพาะเมื่อติดตั้งจาก Setup แล้ว',
+      detail: 'ตอนรันด้วย npm start จะไม่ลบอะไร (และไม่แตะไฟล์ Setup ในโปรเจกต์)',
+    }).catch((err) => logMain('launchUninstaller dialog', err));
+    return;
+  }
+
+  const installDir = path.dirname(process.execPath);
+  const candidates = [
+    path.join(installDir, `Uninstall ${APP_NAME}.exe`),
+    path.join(installDir, 'Uninstall.exe'),
+    path.join(installDir, 'uninstall.exe'),
+  ];
+  const uninstaller = candidates.find((p) => fs.existsSync(p));
+
+  if (!uninstaller) {
+    dialog.showMessageBox({
+      type: 'warning',
+      title: APP_NAME,
+      message: 'ไม่พบตัวถอนการติดตั้ง',
+      detail: installDir,
+    }).catch((err) => logMain('launchUninstaller missing', err));
+    return;
+  }
+
+  // Open NSIS uninstaller (removes installed app only — not the Setup .exe in the repo).
+  shell.openPath(uninstaller).then((errMsg) => {
+    if (errMsg) {
+      logMain('launchUninstaller openPath', errMsg);
+      dialog.showErrorBox(APP_NAME, `เปิดตัวถอนการติดตั้งไม่สำเร็จ:\n${errMsg}`);
+      return;
+    }
+    app.isQuitting = true;
+    clearSnoozeWait();
+    app.quit();
+  });
+}
+
 function updateTrayMenu() {
   const startupEnabled = app.getLoginItemSettings().openAtLogin;
 
@@ -337,6 +433,10 @@ function updateTrayMenu() {
     },
     { type: 'separator' },
     {
+      label: 'ถอนการติดตั้ง',
+      click: () => launchUninstaller(),
+    },
+    {
       label: 'ออก',
       click: () => {
         app.isQuitting = true;
@@ -345,7 +445,7 @@ function updateTrayMenu() {
     },
   ]);
 
-  tray.setToolTip(`OCPet v${APP_VERSION}`);
+  tray.setToolTip(`${APP_NAME} v${APP_VERSION}`);
   tray.setContextMenu(contextMenu);
 }
 
@@ -452,18 +552,29 @@ function setupIpc() {
     return app.getLoginItemSettings().openAtLogin;
   });
 
-  ipcMain.handle('snooze', (event, ms) => {
+  ipcMain.handle('quit-app', () => {
+    app.isQuitting = true;
+    clearSnoozeWait();
+    app.quit();
+  });
+
+  ipcMain.handle('snooze', async (event, ms) => {
     try {
       const win = BrowserWindow.fromWebContents(event.sender);
       if (!win || win.isDestroyed()) return;
 
-      win.webContents.send('pet-visibility', false);
-      win.hide();
-      if (snoozeTimer) clearTimeout(snoozeTimer);
-      snoozeTimer = setTimeout(() => {
-        showPetWindow();
-        snoozeTimer = null;
-      }, ms);
+      const delay = Math.max(0, Number(ms) || 0);
+
+      // Wait until shown again (timer or tray "แสดง Pet").
+      await new Promise((resolve) => {
+        clearSnoozeWait();
+        snoozeResolve = resolve;
+        hidePetWindow();
+        snoozeTimer = setTimeout(() => {
+          snoozeTimer = null;
+          showPetWindow();
+        }, delay);
+      });
     } catch (err) {
       logMain('snooze', err);
     }
@@ -479,7 +590,7 @@ if (gotLock) {
     createTray();
 
     screen.on('display-metrics-changed', () => {
-      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+      if (mainWindow && !mainWindow.isDestroyed() && !petVisuallyHidden) {
         mainWindow.webContents.send('screen-changed');
       }
     });
@@ -506,6 +617,6 @@ if (gotLock) {
 
   app.on('before-quit', () => {
     app.isQuitting = true;
-    if (snoozeTimer) clearTimeout(snoozeTimer);
+    clearSnoozeWait();
   });
 }

@@ -1,4 +1,6 @@
-// OCPet Ver32 — mouse sleep/wake, avoid mouse retarget, skip idle after drag
+// Fla_petDesktop_V32 — soft-hide = opacity 0 + bottom layer; stages pause walk/speech only
+// Middle-click = quit. 7 left taps = snooze. Hide/show use the same reverse path.
+const APP_NAME = 'Fla_petDesktop_V32';
 const APP_VERSION = '32.0.0';
 
 const SPRITES = {
@@ -106,14 +108,21 @@ let pointerSessionStartedAt = 0;
 let endingDragStartedAt = 0;
 let speakStartedAt = 0;
 let isPetVisible = true;
+let visibilityGen = 0;
 let isMouseSleeping = false;
 let lastMouseActiveAt = Date.now();
 let lastCursorWork = null;
 let mouseRetargetUntil = 0;
 let skipNextIdle = false;
+let snoozeTapCount = 0;
+let lastSnoozeTapAt = 0;
+
+const SNOOZE_TAPS_NEEDED = 7;
+const SNOOZE_TAP_GAP_MS = 2000;
+const SNOOZE_TAP_MOVE_PX = 10;
 
 function logError(context, err) {
-  console.error(`[OCPet v${APP_VERSION}] ${context}:`, err);
+  console.error(`[${APP_NAME} v${APP_VERSION}] ${context}:`, err);
 }
 
 function sleep(ms) {
@@ -732,7 +741,8 @@ function shouldAbortAi() {
 }
 
 async function pausePet() {
-  if (!isPetVisible) return;
+  // Soft-hide stages: stop walk / speech / SFX. Window stays alive (opacity handled in main).
+  const gen = ++visibilityGen;
   isPetVisible = false;
 
   dragReleaseGen += 1;
@@ -748,6 +758,7 @@ async function pausePet() {
   if (isPointerSession || isDragFrozen) {
     await cancelPointerSessionQuiet();
   }
+  if (gen !== visibilityGen) return;
 
   try {
     if (window.petAPI?.exitDragMode) {
@@ -756,15 +767,19 @@ async function pausePet() {
   } catch (err) {
     logError('pausePet exitDragMode', err);
   }
+  if (gen !== visibilityGen) return;
 
   resetDragState();
   releaseActivePointer();
   forceIdleSprite();
+  resetSnoozeTaps();
 }
 
 async function resumePet() {
-  if (isPetVisible) return;
+  // Reverse of pause: same path every time (idempotent). Main already restored opacity/layer.
+  const gen = ++visibilityGen;
   isPetVisible = true;
+  isSnoozed = false;
   lastMouseActiveAt = Date.now();
   isMouseSleeping = false;
 
@@ -779,11 +794,16 @@ async function resumePet() {
   resetDragState();
   releaseActivePointer();
   forceIdleSprite();
+  resetSnoozeTaps();
 
   try {
     await refreshScreenSize();
+    if (gen !== visibilityGen) return;
+
     lastSync = { x: -1, y: -1, w: -1, h: -1 };
     await syncWindowPosition(true);
+    if (gen !== visibilityGen) return;
+
     if (window.petAPI?.restoreWindowShell) {
       await window.petAPI.restoreWindowShell();
     }
@@ -1133,6 +1153,11 @@ async function handleSnooze(e) {
     e.stopPropagation();
   }
 
+  if (isSnoozed || !isPetVisible) return;
+
+  snoozeTapCount = 0;
+  lastSnoozeTapAt = 0;
+
   if (isPointerSession) {
     await cancelPointerSessionQuiet();
   }
@@ -1146,7 +1171,39 @@ async function handleSnooze(e) {
     logError('snooze', err);
   } finally {
     isSnoozed = false;
-    await syncWindowPosition(true);
+    if (isPetVisible) {
+      await syncWindowPosition(true);
+    }
+  }
+}
+
+function resetSnoozeTaps() {
+  snoozeTapCount = 0;
+  lastSnoozeTapAt = 0;
+}
+
+function registerSnoozeTap() {
+  const now = Date.now();
+  if (now - lastSnoozeTapAt > SNOOZE_TAP_GAP_MS) {
+    snoozeTapCount = 0;
+  }
+  lastSnoozeTapAt = now;
+  snoozeTapCount += 1;
+
+  if (snoozeTapCount >= SNOOZE_TAPS_NEEDED) {
+    snoozeTapCount = 0;
+    lastSnoozeTapAt = 0;
+    handleSnooze().catch((err) => logError('snooze taps', err));
+  }
+}
+
+function quitAppFromPet() {
+  try {
+    if (window.petAPI?.quitApp) {
+      window.petAPI.quitApp();
+    }
+  } catch (err) {
+    logError('quitAppFromPet', err);
   }
 }
 
@@ -1298,6 +1355,11 @@ async function finishDragSession() {
   isEndingDrag = true;
   endingDragStartedAt = Date.now();
   const gen = dragReleaseGen;
+  const startPos = dragDownPos ? { ...dragDownPos } : null;
+  const movedPx = startPos
+    ? Math.hypot(petX - startPos.petX, petY - startPos.petY)
+    : Infinity;
+  const wasTap = movedPx <= SNOOZE_TAP_MOVE_PX;
 
   try {
     cancelDragMoveSync();
@@ -1316,6 +1378,16 @@ async function finishDragSession() {
     pointerSessionStartedAt = 0;
     setDraggingUi(false);
 
+    if (wasTap) {
+      lastSync = { x: -1, y: -1, w: -1, h: -1 };
+      await syncWindowPosition(true);
+      forceIdleSprite();
+      registerSnoozeTap();
+      return;
+    }
+
+    resetSnoozeTaps();
+
     // Current drop position is n; keep walkTarget B so AI can continue n→B.
     const { maxX, maxY } = getMoveBounds();
     const edges = getTriggerEdgesRaw(petX, petY, maxX, maxY);
@@ -1329,11 +1401,14 @@ async function finishDragSession() {
   } catch (err) {
     logError('finishDragSession', err);
     resetDragState();
+    resetSnoozeTaps();
     return;
   } finally {
     isEndingDrag = false;
     endingDragStartedAt = 0;
   }
+
+  if (wasTap) return;
 
   try {
     await playReleaseFade();
@@ -1367,23 +1442,23 @@ async function onPointerUp(e) {
 }
 
 pet.addEventListener('pointerdown', (e) => {
+  // Middle-click = quit process for real.
+  if (e.button === 1) {
+    e.preventDefault();
+    e.stopPropagation();
+    quitAppFromPet();
+    return;
+  }
+  // Right-click = do nothing (block OS menu only).
   if (e.button === 2) {
     e.preventDefault();
     e.stopPropagation();
-    return;
-  }
-  if (e.button === 1) {
-    handleSnooze(e);
     return;
   }
   if (e.button !== 0) return;
 
   e.preventDefault();
   beginDragSession(e);
-});
-
-pet.addEventListener('auxclick', (e) => {
-  if (e.button === 1) handleSnooze(e);
 });
 
 window.addEventListener('contextmenu', (e) => {
@@ -1393,7 +1468,6 @@ window.addEventListener('contextmenu', (e) => {
 window.addEventListener('pointerdown', (e) => {
   if (e.button === 2) {
     e.preventDefault();
-    e.stopPropagation();
   }
 }, true);
 
