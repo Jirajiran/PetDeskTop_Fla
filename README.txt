@@ -26,5 +26,8 @@ source/                         ← ซอร์สแอป (รัน/แพ�
   คลิกขวา = ไม่ผูกฟีเจอร์
   เมนูถาด → ซ่อน Pet = opacity 0 + ชั้นล่าง (ไม่ปิด Run, หยุดเดิน/พูด)
   เมนูถาด → แสดง Pet = opacity 1 + ชั้นบน (ทางกลับเดียวกัน)
+  ไม่โชว์พรีวิว/ชื่อบนแถบงาน Windows (skipTaskbar + type toolbar)
+  ถ้าชี้ Pet แล้วเคอร์เซอร์เปลี่ยนแต่คลิกไม่ได้ = unlockPetInput (ธง isPetVisible/isSnoozed)
+  ปลุกจากถาด / snooze 3 นาที / OS แตะ → pet-force-input + resumePet
   เมนูถาด → ถอนการติดตั้ง = ลบตัวที่ติดตั้งแล้ว (ไม่ลบไฟล์ Setup ใน repo)
   เมนูถาด → ออก = ปิด Run

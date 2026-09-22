@@ -21,4 +21,7 @@ contextBridge.exposeInMainWorld('petAPI', {
   onVisibilityChange: (callback) => {
     ipcRenderer.on('pet-visibility', (_event, visible) => callback(visible));
   },
+  onForceInput: (callback) => {
+    ipcRenderer.on('pet-force-input', () => callback());
+  },
 });

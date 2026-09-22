@@ -26,6 +26,7 @@ let snoozeResolve = null;
 let dragMoveListener = null;
 /** Soft-hide: opacity 0 + bottom layer (window stays alive, not BrowserWindow.hide). */
 let petVisuallyHidden = false;
+let mouseAcceptTimers = [];
 
 function clearSnoozeWait() {
   if (snoozeTimer) {
@@ -36,6 +37,40 @@ function clearSnoozeWait() {
     const resolve = snoozeResolve;
     snoozeResolve = null;
     resolve();
+  }
+}
+
+function clearMouseAcceptTimers() {
+  for (const id of mouseAcceptTimers) clearTimeout(id);
+  mouseAcceptTimers = [];
+}
+
+/**
+ * Hard-clear Windows stuck setIgnoreMouseEvents(true).
+ * Order matters: opacity must be visible-ish before accept-mouse sticks on some builds.
+ */
+function forceAcceptMouseEvents(win) {
+  if (!win || win.isDestroyed()) return;
+  if (petVisuallyHidden) return;
+
+  const punch = () => {
+    if (!win || win.isDestroyed() || petVisuallyHidden) return;
+    try {
+      win.setOpacity(1);
+      // Toggle sequence — single false is often ignored after a long ignore=true.
+      win.setIgnoreMouseEvents(false);
+      win.setIgnoreMouseEvents(true);
+      win.setIgnoreMouseEvents(false);
+      win.setIgnoreMouseEvents(false);
+    } catch (err) {
+      logMain('forceAcceptMouseEvents', err);
+    }
+  };
+
+  punch();
+  clearMouseAcceptTimers();
+  for (const ms of [0, 16, 32, 50, 100, 200, 400]) {
+    mouseAcceptTimers.push(setTimeout(punch, ms));
   }
 }
 
@@ -58,20 +93,31 @@ function getWorkArea() {
 function applyAlwaysOnTop(win) {
   if (!win || win.isDestroyed()) return;
   if (petVisuallyHidden) return;
+  win.setAlwaysOnTop(false);
   win.setAlwaysOnTop(true, ALWAYS_ON_TOP_LEVEL);
 }
 
+/** Soft-hide visual: invisible + no hit testing + not on top. */
 function applyHiddenVisual(win) {
   if (!win || win.isDestroyed()) return;
-  win.setOpacity(0);
+  clearMouseAcceptTimers();
+  win.setSkipTaskbar(true);
+  win.setFocusable(false);
   win.setIgnoreMouseEvents(true);
+  win.setOpacity(0);
   win.setAlwaysOnTop(false);
 }
 
+/**
+ * Force input-on visual (tray show / snooze wake / OS reassert).
+ * Always hard-clears ignore-mouse (Windows often sticks after soft-hide).
+ */
 function applyVisibleVisual(win) {
   if (!win || win.isDestroyed()) return;
-  win.setIgnoreMouseEvents(false);
+  win.setSkipTaskbar(true);
+  win.setFocusable(false);
   win.setOpacity(1);
+  forceAcceptMouseEvents(win);
   applyAlwaysOnTop(win);
 }
 
@@ -79,8 +125,12 @@ function restorePetWindowShell(win) {
   if (!win || win.isDestroyed()) return;
 
   win.setMenu(null);
+  win.setTitle('');
   win.setSkipTaskbar(true);
   win.setFocusable(false);
+  win.setMinimizable(false);
+  win.setMaximizable(false);
+  win.setFullScreenable(false);
   win.setBackgroundColor('#00000000');
   win.setHasShadow(false);
 
@@ -89,9 +139,30 @@ function restorePetWindowShell(win) {
   }
 
   if (!petVisuallyHidden) {
+    applyAlwaysOnTop(win);
+  } else {
     win.setAlwaysOnTop(false);
-    win.setAlwaysOnTop(true, ALWAYS_ON_TOP_LEVEL);
   }
+}
+
+/** Re-apply shell + soft-hide/show visual after Windows taskbar/OS touches the window. */
+function reassertPetSurface(win = mainWindow) {
+  if (!win || win.isDestroyed()) return;
+  restorePetWindowShell(win);
+  if (petVisuallyHidden) {
+    applyHiddenVisual(win);
+  } else {
+    applyVisibleVisual(win);
+    // Cursor/hover can work while renderer click flags stay locked — force unlock.
+    win.webContents.send('pet-force-input');
+  }
+}
+
+function notifyPetShown() {
+  if (!mainWindow || mainWindow.isDestroyed() || petVisuallyHidden) return;
+  mainWindow.webContents.send('pet-visibility', true);
+  mainWindow.webContents.send('pet-force-input');
+  mainWindow.webContents.send('screen-changed');
 }
 
 function restorePetWindowBounds(win) {
@@ -242,56 +313,65 @@ function hidePetWindow() {
 
   // Soft-hide: keep process + window alive; only hide visually and block hits.
   petVisuallyHidden = true;
-  mainWindow.webContents.send('pet-visibility', false);
+  clearMouseAcceptTimers();
 
   if (!mainWindow.isVisible()) {
     mainWindow.showInactive();
   }
   applyHiddenVisual(mainWindow);
+  // Stages pause after visual is off (same pipe as tray hide / snooze).
+  mainWindow.webContents.send('pet-visibility', false);
 }
 
 function showPetWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
-  // Resolve any snooze waiter (tray show or timer) before restoring UI.
-  clearSnoozeWait();
-
+  // 1) Input/visual ON first — hard clear ignore-mouse before anything else.
   petVisuallyHidden = false;
 
   if (!mainWindow.isVisible()) {
     mainWindow.showInactive();
   }
 
-  restorePetWindowShell(mainWindow);
-  applyVisibleVisual(mainWindow);
+  reassertPetSurface(mainWindow);
   restorePetWindowBounds(mainWindow);
+  forceAcceptMouseEvents(mainWindow);
 
+  // 2) Resume stages + force unlock click flags.
+  notifyPetShown();
+
+  // 3) Resolve snooze AFTER visibility/force-input.
+  clearSnoozeWait();
+
+  // 4) Keep punching accept-mouse (already scheduled inside forceAcceptMouseEvents).
   setTimeout(() => {
     if (mainWindow && !mainWindow.isDestroyed() && !petVisuallyHidden) {
-      applyVisibleVisual(mainWindow);
+      reassertPetSurface(mainWindow);
       restorePetWindowBounds(mainWindow);
+      forceAcceptMouseEvents(mainWindow);
+      mainWindow.webContents.send('pet-force-input');
     }
   }, 50);
-
-  // Same reverse path: opacity + layer first, then resume stages in renderer.
-  mainWindow.webContents.send('pet-visibility', true);
-  mainWindow.webContents.send('screen-changed');
 }
 
 function createWindow() {
   const area = getWorkArea();
 
-  mainWindow = new BrowserWindow({
+  const winOpts = {
     x: area.x + Math.round(area.width / 2 - WINDOW_WIDTH / 2),
     y: area.y + Math.round(area.height - WINDOW_HEIGHT - 60),
     width: WINDOW_WIDTH,
     height: WINDOW_HEIGHT,
+    title: '',
     transparent: true,
     backgroundColor: '#00000000',
     frame: false,
     alwaysOnTop: true,
     hasShadow: false,
     resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
     skipTaskbar: true,
     show: false,
     focusable: false,
@@ -301,15 +381,22 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       backgroundThrottling: false,
     },
-  });
+  };
+  // Windows: toolbar-type windows stay out of normal taskbar / Alt+Tab listing better.
+  if (process.platform === 'win32') {
+    winOpts.type = 'toolbar';
+  }
+
+  mainWindow = new BrowserWindow(winOpts);
 
   mainWindow.loadFile('index.html');
   mainWindow.setMenu(null);
-  applyAlwaysOnTop(mainWindow);
+  mainWindow.setTitle('');
+  restorePetWindowShell(mainWindow);
 
   mainWindow.once('ready-to-show', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.setFocusable(false);
+      reassertPetSurface(mainWindow);
       showPetWindow();
     }
   });
@@ -334,9 +421,31 @@ function createWindow() {
     event.preventDefault();
   });
 
-  mainWindow.on('show', () => {
+  // Topic B: if Windows taskbar/icons touch this window, re-cover visual+input (same pipe).
+  const onOsTouch = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    reassertPetSurface(mainWindow);
+  };
+
+  mainWindow.on('show', onOsTouch);
+  mainWindow.on('restore', onOsTouch);
+  mainWindow.on('focus', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    try {
+      mainWindow.blur();
+    } catch (err) {
+      logMain('blur after OS focus', err);
+    }
+    onOsTouch();
+  });
+  mainWindow.on('blur', onOsTouch);
+
+  mainWindow.on('minimize', (e) => {
+    e.preventDefault();
     if (mainWindow && !mainWindow.isDestroyed()) {
-      restorePetWindowShell(mainWindow);
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.showInactive();
+      onOsTouch();
     }
   });
 
@@ -617,6 +726,7 @@ if (gotLock) {
 
   app.on('before-quit', () => {
     app.isQuitting = true;
+    clearMouseAcceptTimers();
     clearSnoozeWait();
   });
 }

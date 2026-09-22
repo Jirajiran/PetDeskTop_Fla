@@ -1,5 +1,5 @@
-// Fla_petDesktop_V32 — soft-hide = opacity 0 + bottom layer; stages pause walk/speech only
-// Middle-click = quit. 7 left taps = snooze. Hide/show use the same reverse path.
+// Fla_petDesktop_V32 — unlockPetInput: CSS hover can work while click flags stay locked
+// Soft-hide opacity pipe; middle-click quit; 7 taps snooze; show/snooze-wake force unlock.
 const APP_NAME = 'Fla_petDesktop_V32';
 const APP_VERSION = '32.0.0';
 
@@ -651,6 +651,32 @@ async function playReleaseFade() {
   await runFadeSequence(gen, { finishOnIdle: true });
 }
 
+/**
+ * Visual-only UX layer (OOP): click/drag/snooze logic must never await or be gated by this.
+ * Logic may signal; animation plays independently (may be interrupted mid-way).
+ */
+function signalClickUx(kind, dragGen = null) {
+  try {
+    if (kind === 'press') {
+      playClickNote();
+      startPressFade();
+      return;
+    }
+
+    if (kind === 'release-tap' || kind === 'release-drag') {
+      const gen = dragGen;
+      Promise.resolve()
+        .then(async () => {
+          await playReleaseFade();
+          if (gen != null) await playDragComplaint(gen);
+        })
+        .catch((err) => logError(`signalClickUx ${kind}`, err));
+    }
+  } catch (err) {
+    logError('signalClickUx', err);
+  }
+}
+
 async function playFade(options = {}) {
   const opts = typeof options === 'boolean' ? { allowDuringDrag: options } : options;
   const { allowDuringDrag = false, abortIf = null } = opts;
@@ -740,6 +766,23 @@ function shouldAbortAi() {
   return isSnoozed || isDragFrozen || !isPetVisible || isMouseSleeping;
 }
 
+/**
+ * Root click unlock: CSS cursor can show grab while flags still block beginDragSession
+ * after soft-hide / snooze wake. Hover reaching #pet proves the surface is hittable.
+ */
+function unlockPetInput(_reason = '') {
+  isPetVisible = true;
+  isSnoozed = false;
+  isMouseSleeping = false;
+  lastMouseActiveAt = Date.now();
+
+  if (isPointerSession || isDragFrozen || isEndingDrag || isActivelyDragging) {
+    cancelDragMoveSync();
+    releaseActivePointer();
+    resetDragState();
+  }
+}
+
 async function pausePet() {
   // Soft-hide stages: stop walk / speech / SFX. Window stays alive (opacity handled in main).
   const gen = ++visibilityGen;
@@ -776,12 +819,9 @@ async function pausePet() {
 }
 
 async function resumePet() {
-  // Reverse of pause: same path every time (idempotent). Main already restored opacity/layer.
+  // Reverse of pause: unlock click flags first (same pipe every wake).
   const gen = ++visibilityGen;
-  isPetVisible = true;
-  isSnoozed = false;
-  lastMouseActiveAt = Date.now();
-  isMouseSleeping = false;
+  unlockPetInput('resumePet');
 
   dragReleaseGen += 1;
   speechGeneration += 1;
@@ -791,8 +831,6 @@ async function resumePet() {
   stopVoice();
   hideBubble();
   bumpFadeGeneration();
-  resetDragState();
-  releaseActivePointer();
   forceIdleSprite();
   resetSnoozeTaps();
 
@@ -804,11 +842,16 @@ async function resumePet() {
     await syncWindowPosition(true);
     if (gen !== visibilityGen) return;
 
+    // Wake may race with a stale pause — unlock again after awaits.
+    if (gen === visibilityGen) unlockPetInput('resumePet-after-sync');
+
     if (window.petAPI?.restoreWindowShell) {
       await window.petAPI.restoreWindowShell();
     }
+    if (gen === visibilityGen) unlockPetInput('resumePet-done');
   } catch (err) {
     logError('resumePet', err);
+    unlockPetInput('resumePet-error');
   }
 }
 
@@ -1259,7 +1302,9 @@ function releaseActivePointer() {
 }
 
 function beginDragSession(e) {
-  if (isPointerSession || isSnoozed || !isPetVisible) return;
+  // Hover/cursor already reached #pet — unlock flags that may still block after wake.
+  unlockPetInput('beginDragSession');
+  if (isPointerSession) return;
 
   lastMouseActiveAt = Date.now();
   if (isMouseSleeping) {
@@ -1296,8 +1341,7 @@ function startActiveDrag() {
 
   interruptForDrag();
   setDraggingUi(true);
-  playClickNote();
-  startPressFade();
+  signalClickUx('press');
 
   if (window.petAPI?.enterDragMode) {
     window.petAPI.enterDragMode().catch((err) => logError('enterDragMode', err));
@@ -1379,10 +1423,11 @@ async function finishDragSession() {
     setDraggingUi(false);
 
     if (wasTap) {
+      // Logic first: count snooze taps. Animation is a separate fire-and-forget signal.
       lastSync = { x: -1, y: -1, w: -1, h: -1 };
       await syncWindowPosition(true);
-      forceIdleSprite();
       registerSnoozeTap();
+      signalClickUx('release-tap', gen);
       return;
     }
 
@@ -1410,14 +1455,10 @@ async function finishDragSession() {
 
   if (wasTap) return;
 
-  try {
-    await playReleaseFade();
-    await playDragComplaint(gen);
-    if (walkTarget) {
-      skipNextIdle = true;
-    }
-  } catch (err) {
-    logError('finishDragSession post', err);
+  // Drag release: signal UX only — do not block AI/logic on animation completion.
+  signalClickUx('release-drag', gen);
+  if (walkTarget) {
+    skipNextIdle = true;
   }
 }
 
@@ -1440,6 +1481,11 @@ async function onPointerUp(e) {
   if (!isPointerSession) return;
   await finishDragSession();
 }
+
+pet.addEventListener('pointerenter', () => {
+  // CSS cursor can change while click flags stay locked — heal as soon as hover hits.
+  unlockPetInput('pointerenter');
+});
 
 pet.addEventListener('pointerdown', (e) => {
   // Middle-click = quit process for real.
@@ -1517,6 +1563,12 @@ async function init() {
         } else {
           pausePet().catch((err) => logError('onVisibilityChange pause', err));
         }
+      });
+    }
+
+    if (window.petAPI?.onForceInput) {
+      window.petAPI.onForceInput(() => {
+        unlockPetInput('pet-force-input');
       });
     }
 
