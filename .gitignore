@@ -1,7 +1,7 @@
 # Dependencies (reinstall with: npm install inside source/)
 source/node_modules/
 
-# electron-builder junk (NOT the Setup .exe — Setup is committed on purpose)
+# electron-builder junk (NOT the root Setup .exe — that is committed on purpose)
 win-unpacked/
 .icon-ico/
 *.blockmap
