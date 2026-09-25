@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('petAPI', {
   trayIdleReady: () => ipcRenderer.invoke('tray-idle-ready'),
   trayIdleReject: () => ipcRenderer.invoke('tray-idle-reject'),
   setShowSpeechGate: (active) => ipcRenderer.invoke('show-speech-gate', !!active),
+  setAwarenessGate: (active) => ipcRenderer.invoke('awareness-gate', !!active),
   stageHardReset: () => ipcRenderer.invoke('stage-hard-reset'),
   onScreenChanged: (callback) => {
     ipcRenderer.on('screen-changed', () => callback());
@@ -42,8 +43,14 @@ contextBridge.exposeInMainWorld('petAPI', {
   onPetSizeLevel: (callback) => {
     ipcRenderer.on('pet-size-level', (_event, level) => callback(level));
   },
+  onPetSizeSync: (callback) => {
+    ipcRenderer.on('pet-size-sync', (_event, level) => callback(level));
+  },
   onLocale: (callback) => {
     ipcRenderer.on('pet-locale', (_event, pack) => callback(pack || {}));
+  },
+  onLocaleSync: (callback) => {
+    ipcRenderer.on('pet-locale-sync', (_event, pack) => callback(pack || {}));
   },
   onShellBusy: (callback) => {
     ipcRenderer.on('pet-shell-busy', (_event, busy) => callback(!!busy));

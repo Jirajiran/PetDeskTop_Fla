@@ -14,28 +14,35 @@ Desktop pet (Electron). แก้บัคหรือเพิ่มฟีเ�
 
 คำสั่งจาก **Windows system tray และทุกทางที่เทียบเท่า** (แสดง / ซ่อน / Size / ภาษา / snooze wake / second-instance / IPC เดียวกัน):
 
-- **ขนาด / ภาษา / แสดง / ซ่อน** = ท่อ soft เดียวกันผ่าน `enqueueTrayOp` (persist userData + notify → rebootstrap ใน pet)
-- **รีสตาร์ทแอป** = ปุ่ม Tray `relaunch` เท่านั้น (last resort) — ห้าม auto-relaunch จาก Size/locale
-- ระหว่างไม่ว่าง (`shellBusy` / `trayPrepareWaiting` / Show speech): **ไม่เปิดเมนูถาด**; ไอคอน+tooltip ยังอยู่
-- เมนูถาด = **เปิดได้ครั้งเดียว** (`trayMenuOpen` + `popUpContextMenu`); คลิกขวาซ้ำตอนเปิดอยู่แล้วไม่ซ้อนแผง; ไม่ใช้ OS `setContextMenu` อัตโนมัติ
-- ลำดับ awareness: **โป๊ (สูงสุด)** → **Show แนะนำตัว** → other; Show gate กัน YouTube/โหลด
-- Tray แสดง/ซ่อน: กดกลาง other/Show = ทิ้งคลิก; เข้าท่อ = hard reset stage
-- ระหว่าง `shellBusy`: บล็อก / ทิ้ง show-hide/size/locale
+- **Size / ภาษา** = จำดิสก์ → `app.relaunch()` → `app.exit(0)` (ค่าเท่าเดิม = no-op) — **ไม่ใช้ท่อ soft** (ยอมแพ้ soft เพราะรั่ว stage ไล่ไม่หมด; ผู้ใช้เปลี่ยนไม่บ่อย)
+- **แสดง / ซ่อน** = ท่อ soft ผ่าน `enqueueTrayOp` + Hybrid ตาม Stage:
+  - **Show แนะนำตัว** หรือ **Awareness** → **ไม่รับค่าเลย** (ไม่ enqueue)
+  - **Stage อื่น** → หักดิบได้ แล้วคิว latest-wins → Apply
+  - **shellBusy mid-apply** → คิวรอ `endShellOp` แล้ว prepare
+- **ภายใน pet** (พูด→คลิก→Snooze) เปลี่ยน stage กันเองได้
+- **รีสตาร์ท** = ปุ่ม Tray หรืออัตโนมัติหลัง Size/ภาษา — `relaunch` อย่างเดียวไม่พอ ต้อง `exit` ด้วย
+- ระหว่าง `shellBusy` (show/hide): **ไม่เปิดเมนูถาด**; Show/Awareness เปิดเมนูได้เพื่อเลือก Size/ภาษา (แล้ว relaunch)
+- เมนูถาด = **เปิดได้ครั้งเดียว** (`trayMenuOpen` + `popUpContextMenu`)
+- **คลิกขวาไอคอนถาด** = เปิด/ปิด panel อย่างเดียว — ห้ามแตะ pet pipe; ค่า Size/ภาษาส่งตอนกด MenuItem แล้ว relaunch
+- หลังปิดเมนูถาด = **soft hide→show ภาพ** (`scheduleCaptionSoftHideShow`) เมื่อปลอดภัย — เคลียร์ caption; ไม่ IPC visibility / ไม่บท Show; ไม่ปลอดภัย = strip title อย่างเดียว
+- focus/blur = caption only; heavy reassert เฉพาะ show/restore/minimize และข้ามตอน `shellBusy`
+- ลำดับ awareness: **โป๊ (สูงสุด)** → **Show แนะนำตัว** → other
 - Boot: awareness หลัง show shell ปิดครั้งแรก
 - ห้าม invent `shellBusyOwner`/awareness reclaim ที่ตัด `shell-ready` ตอน boot
 - ขั้นต่ำ ~700ms / สูงสุดมี timeout — อย่าปลด busy ก่อนท่อ settle
-- เข้าท่อ show/hide/size/locale ด้วย `beginShellOp` → settle ภาพ → `shell-ready` → `endShellOp`
+- เข้าท่อ show/hide ด้วย `beginShellOp` → settle ภาพ → `shell-ready` → `endShellOp`
 
 ## 2. ท่อเดียวกัน (pipeline / OOP stage)
 
-ซ่อน↔แสดง, เปลี่ยน Size, เปลี่ยนภาษา = **ท่อเดียว**:
+**ซ่อน↔แสดง** = ท่อ soft:
 
 `pause → apply → resume → Show speech (เรียงหมวด)`
 
 - Soft-hide: ไม่ `BrowserWindow.hide` — opacity + ignore-mouse; หน้าต่างยังมีชีวิต
 - **Always-on-top = boot-only** — ห้ามสลับตอน show/hide/drag (ดึงแอปอื่นบน Windows)
-- Size / locale เท่าเดิม: no-op — ห้าม bump `visibilityGen` / rebootstrap ฟรี
+- Size / locale เท่าเดิม: no-op — ไม่ relaunch ฟรี
 - Show จาก tray: ห้ามยิง `notifyPetSize` ซ้ำจนฆ่าท่อพูด
+- **ห้ามหักดิบ Show / Awareness** จากภายนอกตอน show/hide; Stage other หักได้ตอน prepare
 
 `visibilityGen` คือรุ่นท่อ — ท่อใหม่ฆ่าของเก่า; early-return ต้อง `shell-ready` ด้วยถ้าเคย `beginShellOp`
 
@@ -46,7 +53,7 @@ Desktop pet (Electron). แก้บัคหรือเพิ่มฟีเ�
 - **Show** = ทุกหมวดยกเว้นตัวสุดท้าย
 - **Awareness** = ทั้งแถว; **หมวดสุดท้าย = ลา + thenQuit** เสมอ
 - ขยายรอบ = แก้ JSON ไม่ hardcode จำนวนรอบใน logic
-- เปลี่ยนภาษา = soft rebootstrap แบบ Size + จำ locale ใน userData (ไม่ auto-relaunch)
+- **เปลี่ยนภาษา / Size** = เคสปิด (locale th|en|zh, Size 1..8) + จำดิสก์ + relaunch
 
 ## 4. Awareness (รองจาก shell busy)
 
@@ -54,6 +61,7 @@ Desktop pet (Electron). แก้บัคหรือเพิ่มฟีเ�
 - พูดแบบ `force` — ห้าม `startSpeaking` ธรรมดาที่ติด `isDragFrozen` แล้ว skip รอบ
 - โป๊/แบน: session แรกไล่คิวหมวดแล้ว quit; `reopenCount` +1 ต่อเปิดแอปหลังแบน ไม่ใช่ต่อปิดแท็บระหว่างพูด
 - ≥4: พูดคลังลาแล้วปิด — ห้ามเงียบปิดโดยไม่พูด (ทดสอบต้องเห็น)
+- External แสดง/ซ่อน ตอน awareness = **refuse**; Size/ภาษา = relaunch (state ใหม่สะอาด)
 - อย่ารวม awareness เข้า `shellBusy` แบบ owner/reclaim จนกว่าจะออกแบบไม่ชนท่อ show ตอน boot
 
 ## 5. Pet input / motion
@@ -78,7 +86,8 @@ Desktop pet (Electron). แก้บัคหรือเพิ่มฟีเ�
 
 ## ตรวจก่อน ship
 
-- คำสั่ง tray รัวแล้วยังไม่ซ้อนท่อ / ไม่ค้าง busy ตลอดกาล
-- ซ่อน→แสดง และ Size/ภาษา ได้ Show ตามหมวด i18n
+- Size/ภาษา: จำค่า → รีสตาร์ทแอป → ค่าใหม่หลัง boot
+- ค่า Size/ภาษาเท่าเดิม: ไม่ relaunch
+- ซ่อน↔แสดง soft ยังได้ Show ตามหมวด i18n
 - Awareness ยังพูดครบคิวแล้ว quit ตามสเปก
 - ไม่แตะ alwaysOnTop นอก boot

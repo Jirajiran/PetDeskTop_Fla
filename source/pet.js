@@ -195,19 +195,31 @@ function isPetTrulyIdle() {
 }
 
 /**
- * Tray prepare: if idle → allow pipe; else REJECT (return / ignore click).
- * No wait queue — full prevent while Stage other / Show intro is active.
+ * Hybrid tray prepare:
+ * - Show / Awareness → refuse (no wait, no hard-cut of those stages)
+ * - Stage other (walk / casual speak / drag) → hard-cut then ready
  */
 async function settleForTrayPrepare() {
   try {
-    if (isPetTrulyIdle()) {
-      if (window.petAPI?.trayIdleReady) {
-        await window.petAPI.trayIdleReady();
+    if (showSpeechActiveLocal || awarenessPriorityActive || awarenessSpeakLock) {
+      if (window.petAPI?.trayIdleReject) {
+        await window.petAPI.trayIdleReject();
       }
       return;
     }
-    if (window.petAPI?.trayIdleReject) {
-      await window.petAPI.trayIdleReject();
+
+    await hardCutGeneralStageForTray();
+
+    // Re-check: awareness/Show may have seized during cut.
+    if (showSpeechActiveLocal || awarenessPriorityActive || awarenessSpeakLock) {
+      if (window.petAPI?.trayIdleReject) {
+        await window.petAPI.trayIdleReject();
+      }
+      return;
+    }
+
+    if (window.petAPI?.trayIdleReady) {
+      await window.petAPI.trayIdleReady();
     }
   } catch (err) {
     logError('settleForTrayPrepare', err);
@@ -219,6 +231,49 @@ async function settleForTrayPrepare() {
       logError('trayIdleReject', err2);
     }
   }
+}
+
+/**
+ * Hard-cut Stage other only (walk, casual speak, drag toys).
+ * Never clears Show gate or awareness priority.
+ */
+async function hardCutGeneralStageForTray() {
+  if (showSpeechActiveLocal || awarenessPriorityActive || awarenessSpeakLock) return;
+
+  walkTarget = null;
+  lastDirection = null;
+  mouseFleeDidFlee = false;
+  mouseFleePendingSide = null;
+  skipNextIdle = false;
+  isMouseSleeping = false;
+  isTransitioning = false;
+
+  if (isSpeaking) {
+    speechGeneration += 1;
+    isSpeaking = false;
+    speakStartedAt = 0;
+    try {
+      stopVoice();
+      hideBubble();
+    } catch (_) { /* ignore */ }
+  }
+
+  dragReleaseGen += 1;
+  if (isPointerSession || isDragFrozen || isActivelyDragging || isEndingDrag) {
+    try {
+      await cancelPointerSessionQuiet();
+    } catch (err) {
+      logError('hardCutGeneralStageForTray cancelPointer', err);
+    }
+  }
+  resetDragState();
+  releaseActivePointer();
+  isDragFrozen = false;
+  isActivelyDragging = false;
+  isEndingDrag = false;
+  isDragSettling = false;
+
+  forceIdleSprite();
 }
 
 async function setShowSpeechGate(active) {
@@ -247,10 +302,15 @@ async function setShowSpeechGate(active) {
 }
 
 /**
- * Tray pipe = fresh start. Clear sticky stage flags before pause/rebootstrap.
- * Does not touch porn mid-flight in main if pornSequenceActive (awareness.resetGeneral).
+ * Tray pipe = fresh start for Stage other leftovers before pause/rebootstrap.
+ * Does not clear Show/Awareness protect gates (those stages refuse external entry).
  */
 async function hardResetStagesForTrayPipe() {
+  // Never wipe Show / Awareness ownership — external must have been refused already.
+  if (showSpeechActiveLocal || awarenessPriorityActive || awarenessSpeakLock) {
+    return;
+  }
+
   showSpeechGateGen += 1;
   showSpeechActiveLocal = false;
 
@@ -275,8 +335,6 @@ async function hardResetStagesForTrayPipe() {
   mouseFleeDidFlee = false;
   mouseFleePendingSide = null;
   skipNextIdle = false;
-  awarenessSpeakLock = false;
-  awarenessPriorityActive = false;
 
   try {
     stopVoice();
@@ -407,12 +465,23 @@ function sizeScale(level = petSizeLevel) {
   return 1 + (n - 1) * 0.2;
 }
 
+/** Size case 1..8 only. */
+function normalizeSizeCase(level) {
+  const n = Math.floor(Number(level));
+  switch (true) {
+    case n >= 1 && n <= 8:
+      return n;
+    default:
+      return 1;
+  }
+}
+
 function applyPetSizeLevel(level) {
   const prevPet = WIN_PET;
   const centerX = petX + prevPet * 0.5;
   const centerY = petY + prevPet * 0.5;
 
-  petSizeLevel = Math.max(1, Math.min(8, Math.floor(Number(level) || 1)));
+  petSizeLevel = normalizeSizeCase(level);
   const scale = sizeScale(petSizeLevel);
   WIN_PET = Math.max(1, roundHalfUp(BASE_WIN_PET * scale));
   WIN_W = Math.max(1, roundHalfUp(BASE_WIN_W * scale));
@@ -446,6 +515,100 @@ function applyPetSizeLevel(level) {
     const clamped = clampPetPosition(petX, petY);
     setPetPosition(clamped.x, clamped.y, true);
   }
+}
+
+function syncLocaleFromMain(pack) {
+  visibilityGen += 1;
+  speechGeneration += 1;
+  isSpeaking = false;
+  stopVoice();
+  hideBubble();
+  applyLocalePack(pack || {});
+  forceIdleSprite();
+  rebirthAfterSettingsChange('locale-sync').catch((err) => logError('locale-sync rebirth', err));
+}
+
+/**
+ * Round-2 Re after Size/locale: same as soft new Run for runtime state.
+ * Keeps size/locale/lock/position; clears sticky stages so leftovers cannot bug-loop.
+ * Does not bump visibilityGen (caller owns shell-ready / pipe gen).
+ */
+async function rebirthAfterSettingsChange(reason) {
+  showSpeechGateGen += 1;
+  showSpeechActiveLocal = false;
+  try {
+    if (window.petAPI?.setShowSpeechGate) {
+      await window.petAPI.setShowSpeechGate(false);
+    }
+  } catch (err) {
+    logError('rebirth setShowSpeechGate', err);
+  }
+
+  dragReleaseGen += 1;
+  speechGeneration += 1;
+  isSpeaking = false;
+  isTransitioning = false;
+  speakStartedAt = 0;
+  isMouseSleeping = false;
+  walkTarget = null;
+  lastDirection = null;
+  mouseFleeDidFlee = false;
+  mouseFleePendingSide = null;
+  skipNextIdle = false;
+  if (!awarenessPriorityActive) {
+    awarenessSpeakLock = false;
+  }
+
+  try {
+    stopVoice();
+    hideBubble();
+  } catch (_) { /* ignore */ }
+  bumpFadeGeneration();
+
+  if (isPointerSession || isDragFrozen || isActivelyDragging || isEndingDrag) {
+    try {
+      await cancelPointerSessionQuiet();
+    } catch (err) {
+      logError('rebirth cancelPointer', err);
+    }
+  }
+  resetDragState();
+  releaseActivePointer();
+  isDragFrozen = false;
+  isActivelyDragging = false;
+  isEndingDrag = false;
+  isDragSettling = false;
+
+  resetSnoozeTaps();
+  beginFeatureGate();
+  scheduleNextWarp();
+  forceIdleSprite();
+  unlockPetInput(`rebirth-${reason || 'settings'}`);
+
+  try {
+    lastSync = { x: -1, y: -1, w: -1, h: -1 };
+    await syncWindowPosition(true);
+    if (window.petAPI?.restoreWindowShell) {
+      await window.petAPI.restoreWindowShell();
+    }
+  } catch (err) {
+    logError('rebirthAfterSettingsChange', err);
+  }
+}
+
+/** Rollback/sync from main without full tray pipe or Show speech (no shell-ready). */
+function syncPetSizeFromMain(level) {
+  visibilityGen += 1;
+  speechGeneration += 1;
+  isSpeaking = false;
+  stopVoice();
+  hideBubble();
+  applyPetSizeLevel(level);
+  forceIdleSprite();
+  lastSync = { x: -1, y: -1, w: -1, h: -1 };
+  syncWindowPosition(true)
+    .then(() => rebirthAfterSettingsChange('size-sync'))
+    .catch((err) => logError('syncPetSizeFromMain', err));
 }
 
 function logError(context, err) {
@@ -1579,14 +1742,15 @@ function pickShowSpeechPhrase(roundIndex) {
 }
 
 async function waitSoftShowSpeakSlot(gen) {
+  const started = Date.now();
+  const maxWaitMs = 5000;
   while (gen === visibilityGen) {
     if (!isPetVisible || isSnoozed) return false;
     if (awarenessPriorityActive) return false;
-    if (!areFeaturesReady()) {
-      await sleep(50);
-      continue;
-    }
-    return true;
+    if (areFeaturesReady()) return true;
+    // Do not hang forever if feature gate keeps getting nudged mid-pipe.
+    if (Date.now() - started >= maxWaitMs) return true;
+    await sleep(50);
   }
   return false;
 }
@@ -1637,9 +1801,12 @@ async function maybeSpeakOnSoftShow(gen) {
  * No hide/show SFX and no window opacity (pet stays on screen while footprint updates).
  */
 async function rebootstrapAfterSizeChange(level) {
-  const next = Math.max(1, Math.min(8, Math.floor(Number(level) || 1)));
+  const next = normalizeSizeCase(level);
   // Same level (e.g. echo) — do not bump visibilityGen or kill Show speech.
-  if (next === petSizeLevel) return;
+  if (next === petSizeLevel) {
+    notifyShellReady('size-rebootstrap');
+    return;
+  }
 
   await hardResetStagesForTrayPipe();
 
@@ -1725,6 +1892,11 @@ async function rebootstrapAfterSizeChange(level) {
     }
     if (resumeGen === visibilityGen) unlockPetInput('size-rebootstrap-done');
 
+    // Round-2 Re before commit — Size ≡ soft new Run (no leftover stage values).
+    if (resumeGen === visibilityGen) {
+      await rebirthAfterSettingsChange('size-full');
+    }
+
     // Close Tray shell before Show talk (Stage other).
     if (resumeGen === visibilityGen) notifyShellReady('size-rebootstrap');
 
@@ -1743,83 +1915,226 @@ async function rebootstrapAfterSizeChange(level) {
 }
 
 /**
- * Locale change = soft hide → apply pack → soft show (same pipe as Size).
+ * Locked + stay-put idle: light settings pipe (no soft-hide).
+ * Ignore shellBusyActive — already inside tray Size/locale op.
  */
-async function rebootstrapAfterLocaleChange(pack) {
-  await hardResetStagesForTrayPipe();
+function canUseLightSettingsPipe() {
+  if (!isMovementLocked) return false;
+  if (showSpeechActiveLocal) return false;
+  if (!isPetVisible || isSnoozed) return false;
+  if (awarenessPriorityActive || awarenessSpeakLock) return false;
+  if (isSpeaking || isTransitioning) return false;
+  if (isPointerSession || isDragFrozen || isActivelyDragging || isEndingDrag) return false;
+  if (walkTarget) return false;
+  if (currentSprite !== 'idle' && currentSprite !== 'sleep') return false;
+  return true;
+}
 
-  applyLocalePack(pack);
+/** @returns {'light'|'full'} */
+function settingsPipeMode() {
+  return canUseLightSettingsPipe() ? 'light' : 'full';
+}
 
-  const pauseGen = ++visibilityGen;
-  isPetVisible = false;
-  beginFeatureGate();
+/**
+ * Locked + idle: apply size case 1..8 without soft-hide / full rebootstrap.
+ */
+async function lightSizeChange(level) {
+  const next = normalizeSizeCase(level);
+  if (next === petSizeLevel) {
+    notifyShellReady('size-rebootstrap');
+    return;
+  }
 
-  dragReleaseGen += 1;
   speechGeneration += 1;
   isSpeaking = false;
   isTransitioning = false;
   speakStartedAt = 0;
-  isMouseSleeping = false;
-  walkTarget = null;
-  lastDirection = null;
-  mouseFleeDidFlee = false;
-  mouseFleePendingSide = null;
-  skipNextIdle = false;
   stopVoice();
   hideBubble();
-  bumpFadeGeneration();
 
-  if (isPointerSession || isDragFrozen) {
-    await cancelPointerSessionQuiet();
+  applyPetSizeLevel(next);
+  forceIdleSprite();
+  unlockPetInput('size-light');
+
+  try {
+    lastSync = { x: -1, y: -1, w: -1, h: -1 };
+    await syncWindowPosition(true);
+  } catch (err) {
+    logError('lightSizeChange sync', err);
   }
-  if (pauseGen !== visibilityGen) {
-    notifyShellReady('locale-stale');
+
+  // Round-2 Re: Size change ≡ soft new Run (clear leftovers before commit).
+  await rebirthAfterSettingsChange('size-light');
+  notifyShellReady('size-rebootstrap');
+}
+
+/**
+ * Locked + idle: swap locale pack without soft-hide / full rebootstrap.
+ * shell-ready first (commit), then one short Show/idle line.
+ */
+async function lightLocaleChange(pack) {
+  let shellClosed = false;
+  const closeShell = (reason) => {
+    if (shellClosed) return;
+    shellClosed = true;
+    notifyShellReady(reason);
+  };
+
+  try {
+    speechGeneration += 1;
+    isSpeaking = false;
+    isTransitioning = false;
+    speakStartedAt = 0;
+    stopVoice();
+    hideBubble();
+
+    applyLocalePack(pack);
+    forceIdleSprite();
+    unlockPetInput('locale-light');
+    // Round-2 Re: locale change ≡ soft new Run before commit + short speak.
+    await rebirthAfterSettingsChange('locale-light');
+    closeShell('locale-rebootstrap');
+  } catch (err) {
+    logError('lightLocaleChange', err);
+    unlockPetInput('locale-light-error');
+    closeShell('locale-rebootstrap-error');
     return;
   }
 
+  if (!isPetVisible || isSnoozed || awarenessPriorityActive) return;
+
   try {
-    if (window.petAPI?.exitDragMode) {
-      await window.petAPI.exitDragMode();
+    const phrase = pickShowSpeechPhrase(0) || pickFromPoolList(localePack.pools?.idle);
+    if (phrase) {
+      await startSpeaking(phrase, { force: true });
     }
   } catch (err) {
-    logError('rebootstrapAfterLocaleChange exitDragMode', err);
+    logError('lightLocaleChange speak', err);
   }
-  if (pauseGen !== visibilityGen) {
-    notifyShellReady('locale-stale');
-    return;
+}
+
+/** Closed Size cases 1..8 → light or full pipe. */
+async function dispatchSizeChange(level) {
+  const next = normalizeSizeCase(level);
+  switch (settingsPipeMode()) {
+    case 'light':
+      await lightSizeChange(next);
+      break;
+    case 'full':
+    default:
+      await rebootstrapAfterSizeChange(next);
+      break;
   }
+}
 
-  resetDragState();
-  releaseActivePointer();
-  forceIdleSprite();
-  resetSnoozeTaps();
+/** Closed locale cases th/en/zh → light or full pipe. */
+async function dispatchLocaleChange(pack) {
+  try {
+    switch (settingsPipeMode()) {
+      case 'light':
+        await lightLocaleChange(pack);
+        break;
+      case 'full':
+      default:
+        await rebootstrapAfterLocaleChangeFull(pack);
+        break;
+    }
+  } catch (err) {
+    logError('dispatchLocaleChange', err);
+    try {
+      notifyShellReady('locale-rebootstrap-error');
+    } catch (err2) {
+      logError('dispatchLocaleChange shell-ready', err2);
+    }
+  }
+}
 
-  const resumeGen = ++visibilityGen;
-  beginFeatureGate();
-  unlockPetInput('locale-rebootstrap');
-
-  dragReleaseGen += 1;
-  speechGeneration += 1;
-  isSpeaking = false;
-  isTransitioning = false;
-  speakStartedAt = 0;
-  stopVoice();
-  hideBubble();
-  bumpFadeGeneration();
-  forceIdleSprite();
-  resetSnoozeTaps();
+/**
+ * Locale full pipe = soft hide → apply pack → soft show (same as Size full).
+ * Always closes shell (shell-ready) before Show talk — never leave shellBusy stuck.
+ */
+async function rebootstrapAfterLocaleChangeFull(pack) {
+  let shellClosed = false;
+  const closeShell = (reason) => {
+    if (shellClosed) return;
+    shellClosed = true;
+    notifyShellReady(reason);
+  };
 
   try {
+    await hardResetStagesForTrayPipe();
+
+    applyLocalePack(pack);
+
+    const pauseGen = ++visibilityGen;
+    isPetVisible = false;
+    beginFeatureGate();
+
+    dragReleaseGen += 1;
+    speechGeneration += 1;
+    isSpeaking = false;
+    isTransitioning = false;
+    speakStartedAt = 0;
+    isMouseSleeping = false;
+    walkTarget = null;
+    lastDirection = null;
+    mouseFleeDidFlee = false;
+    mouseFleePendingSide = null;
+    skipNextIdle = false;
+    stopVoice();
+    hideBubble();
+    bumpFadeGeneration();
+
+    if (isPointerSession || isDragFrozen) {
+      await cancelPointerSessionQuiet();
+    }
+    if (pauseGen !== visibilityGen) {
+      closeShell('locale-stale');
+      return;
+    }
+
+    try {
+      if (window.petAPI?.exitDragMode) {
+        await window.petAPI.exitDragMode();
+      }
+    } catch (err) {
+      logError('rebootstrapAfterLocaleChange exitDragMode', err);
+    }
+    if (pauseGen !== visibilityGen) {
+      closeShell('locale-stale');
+      return;
+    }
+
+    resetDragState();
+    releaseActivePointer();
+    forceIdleSprite();
+    resetSnoozeTaps();
+
+    const resumeGen = ++visibilityGen;
+    beginFeatureGate();
+    unlockPetInput('locale-rebootstrap');
+
+    dragReleaseGen += 1;
+    speechGeneration += 1;
+    isSpeaking = false;
+    isTransitioning = false;
+    speakStartedAt = 0;
+    stopVoice();
+    hideBubble();
+    bumpFadeGeneration();
+    forceIdleSprite();
+    resetSnoozeTaps();
+
     await refreshScreenSize();
     if (resumeGen !== visibilityGen) {
-      notifyShellReady('locale-stale');
+      closeShell('locale-stale');
       return;
     }
 
     lastSync = { x: -1, y: -1, w: -1, h: -1 };
     await syncWindowPosition(true);
     if (resumeGen !== visibilityGen) {
-      notifyShellReady('locale-stale');
+      closeShell('locale-stale');
       return;
     }
 
@@ -1830,8 +2145,18 @@ async function rebootstrapAfterLocaleChange(pack) {
     }
     if (resumeGen === visibilityGen) unlockPetInput('locale-rebootstrap-done');
 
+    // Round-2 Re before commit — locale ≡ soft new Run.
+    if (resumeGen === visibilityGen) {
+      await rebirthAfterSettingsChange('locale-full');
+    }
+
     // Close Tray shell before Show talk (Stage other).
-    if (resumeGen === visibilityGen) notifyShellReady('locale-rebootstrap');
+    if (resumeGen === visibilityGen) {
+      closeShell('locale-rebootstrap');
+    } else {
+      closeShell('locale-stale');
+      return;
+    }
 
     if (resumeGen === visibilityGen && isPetVisible) {
       try {
@@ -1843,7 +2168,10 @@ async function rebootstrapAfterLocaleChange(pack) {
   } catch (err) {
     logError('rebootstrapAfterLocaleChange', err);
     unlockPetInput('locale-rebootstrap-error');
-    notifyShellReady('locale-rebootstrap-error');
+    closeShell('locale-rebootstrap-error');
+  } finally {
+    // Last resort — never leave main shellBusy open if an early path forgot closeShell.
+    closeShell('locale-rebootstrap-error');
   }
 }
 
@@ -2689,19 +3017,29 @@ async function init() {
 
     if (window.petAPI?.onPetSizeLevel) {
       window.petAPI.onPetSizeLevel((level) => {
-        const next = Math.max(1, Math.min(8, Math.floor(Number(level) || 1)));
-        if (next === petSizeLevel) return;
-        rebootstrapAfterSizeChange(next).catch((err) => {
-          logError('onPetSizeLevel rebootstrap', err);
+        dispatchSizeChange(level).catch((err) => {
+          logError('onPetSizeLevel dispatch', err);
         });
+      });
+    }
+
+    if (window.petAPI?.onPetSizeSync) {
+      window.petAPI.onPetSizeSync((level) => {
+        syncPetSizeFromMain(level);
       });
     }
 
     if (window.petAPI?.onLocale) {
       window.petAPI.onLocale((pack) => {
-        rebootstrapAfterLocaleChange(pack).catch((err) => {
-          logError('onLocale rebootstrap', err);
+        dispatchLocaleChange(pack).catch((err) => {
+          logError('onLocale dispatch', err);
         });
+      });
+    }
+
+    if (window.petAPI?.onLocaleSync) {
+      window.petAPI.onLocaleSync((pack) => {
+        syncLocaleFromMain(pack);
       });
     }
 
@@ -2783,6 +3121,13 @@ function awarenessForceQuit() {
 /** Stop walk/drag/AI toys so awareness lines 1→2→3 can always run. */
 async function seizeForAwareness() {
   awarenessPriorityActive = true;
+  try {
+    if (window.petAPI?.setAwarenessGate) {
+      await window.petAPI.setAwarenessGate(true);
+    }
+  } catch (err) {
+    logError('seizeForAwareness setAwarenessGate', err);
+  }
   walkTarget = null;
   skipNextIdle = false;
   lastDirection = null;
@@ -2860,12 +3205,33 @@ async function awarenessHandleSpeak(payload) {
     }
     if (thenQuit) {
       awarenessPriorityActive = false;
+      try {
+        if (window.petAPI?.setAwarenessGate) {
+          await window.petAPI.setAwarenessGate(false);
+        }
+      } catch (err) {
+        logError('awarenessHandleSpeak clear gate quit', err);
+      }
       awarenessForceQuit();
     } else if (keepPriority) {
       // Hold lock for chained rounds 1→2→3
       awarenessPriorityActive = true;
+      try {
+        if (window.petAPI?.setAwarenessGate) {
+          await window.petAPI.setAwarenessGate(true);
+        }
+      } catch (err) {
+        logError('awarenessHandleSpeak keep gate', err);
+      }
     } else {
       awarenessPriorityActive = false;
+      try {
+        if (window.petAPI?.setAwarenessGate) {
+          await window.petAPI.setAwarenessGate(false);
+        }
+      } catch (err) {
+        logError('awarenessHandleSpeak clear gate', err);
+      }
     }
   }
 }

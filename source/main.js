@@ -23,6 +23,11 @@ const BASE_WINDOW_HEIGHT = 120;
 const ALWAYS_ON_TOP_LEVEL = 'screen-saver';
 const LOCALE_FILE = 'pet-locale.json';
 const SIZE_FILE = 'pet-size.json';
+/** Closed Size cases — only 1..8 are valid (default 1). */
+const SIZE_CASE_MIN = 1;
+const SIZE_CASE_MAX = 8;
+/** Closed locale cases — th/en/zh only (tray treats as 1..3). */
+const LOCALE_CASES = ['th', 'en', 'zh'];
 
 let mainWindow = null;
 /** @type {{ action: string, text?: string }} */
@@ -54,7 +59,8 @@ let shellBusyStartedAt = 0;
 const SHELL_BUSY_MIN_MS = 700;
 const SHELL_BUSY_MAX_MS = 12000;
 /**
- * Tray gate: one shot check — idle → run pipe; else DROP (return, no queue / no wait).
+ * Tray external op slot (latest wins) — only while Stage other / shell drain.
+ * Show + Awareness: never store here (refuse at gate).
  * @type {null | { kind: 'show' | 'hide' | 'size' | 'locale', value?: any }}
  */
 let pendingTrayOp = null;
@@ -68,17 +74,55 @@ let awarenessStarted = false;
 let bootShowStarted = false;
 /** Soft-show intro (แนะนำตัว) — blocks general awareness; porn ignores this. */
 let showSpeechActive = false;
+/** Renderer awareness priority (keepPriority gaps) — same protect class as Show. */
+let awarenessGateActive = false;
+/**
+ * Size/locale: do not persist until shell-ready success.
+ * @type {null | { kind: 'size' | 'locale', previous: any, next: any }}
+ */
+let settingsPersistPending = null;
 
 function roundHalfUp(x) {
   return Math.floor(Number(x) + 0.5);
 }
 
-function applySizeLevel(level) {
-  petSizeLevel = Math.max(1, Math.min(8, Math.floor(Number(level) || 1)));
-  const scale = 1 + (petSizeLevel - 1) * 0.2;
+/** @returns {number} Size case 1..8 */
+function normalizeSizeCase(level) {
+  const n = Math.floor(Number(level));
+  switch (true) {
+    case n >= SIZE_CASE_MIN && n <= SIZE_CASE_MAX:
+      return n;
+    default:
+      return SIZE_CASE_MIN;
+  }
+}
+
+/** @returns {'th'|'en'|'zh'} Locale case */
+function normalizeLocaleCase(code) {
+  const c = String(code || '').toLowerCase();
+  switch (c) {
+    case 'th':
+    case 'en':
+    case 'zh':
+      return c;
+    default:
+      return i18n.DEFAULT_LOCALE;
+  }
+}
+
+/** Update window geometry from level. Does not change committed petSizeLevel. */
+function applySizeGeometry(level) {
+  const n = normalizeSizeCase(level);
+  const scale = 1 + (n - 1) * 0.2;
   PET_SIZE = Math.max(1, roundHalfUp(BASE_PET_SIZE * scale));
   WINDOW_WIDTH = Math.max(1, roundHalfUp(BASE_WINDOW_WIDTH * scale));
   WINDOW_HEIGHT = Math.max(1, roundHalfUp(BASE_WINDOW_HEIGHT * scale));
+  return n;
+}
+
+/** Commit size level + geometry (boot / successful settle / rollback). */
+function applySizeLevel(level) {
+  petSizeLevel = applySizeGeometry(level);
 }
 
 function localeFilePath() {
@@ -102,8 +146,7 @@ function loadSavedLocale() {
     const p = localeFilePath();
     if (!fs.existsSync(p)) return i18n.DEFAULT_LOCALE;
     const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
-    const code = String(raw.locale || '').toLowerCase();
-    return i18n.LOCALES.includes(code) ? code : i18n.DEFAULT_LOCALE;
+    return normalizeLocaleCase(raw.locale);
   } catch (_) {
     return i18n.DEFAULT_LOCALE;
   }
@@ -122,12 +165,11 @@ function saveLocale() {
 function loadSavedSizeLevel() {
   try {
     const p = sizeFilePath();
-    if (!fs.existsSync(p)) return 1;
+    if (!fs.existsSync(p)) return SIZE_CASE_MIN;
     const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
-    const n = Math.max(1, Math.min(8, Math.floor(Number(raw.sizeLevel) || 1)));
-    return n;
+    return normalizeSizeCase(raw.sizeLevel);
   } catch (_) {
-    return 1;
+    return SIZE_CASE_MIN;
   }
 }
 
@@ -142,8 +184,8 @@ function saveSizeLevel() {
 }
 
 /**
- * Manual Tray escape hatch only — last resort when soft pipe is stuck.
- * Size / locale / show / hide use soft rebootstrap; do not auto-call this.
+ * Restart after Size/locale (or manual Tray relaunch).
+ * app.relaunch only schedules the next run — must exit current process.
  */
 function relaunchForTraySettings(reason) {
   try {
@@ -169,57 +211,51 @@ function notifyLocale() {
   mainWindow.webContents.send('pet-locale', i18n.packForRenderer());
 }
 
+/**
+ * Size/ภาษา: จำดิสก์แล้ว relaunch+exit — ไม่ใช้ท่อ soft (รั่ว stage ไล่ไม่หมด).
+ * ค่าเท่าเดิม = no-op.
+ */
 function setPetLocale(code) {
-  const next = i18n.LOCALES.includes(code) ? code : i18n.DEFAULT_LOCALE;
+  const next = normalizeLocaleCase(code);
   if (next === petLocale) return petLocale;
-  enqueueTrayOp({ kind: 'locale', value: next });
+  petLocale = next;
+  i18n.loadLocale(next);
+  try {
+    awareness.setLocale(next);
+  } catch (err) {
+    logMain('setPetLocale awareness', err);
+  }
+  saveLocale();
+  relaunchForTraySettings('locale');
   return petLocale;
 }
 
 function setPetLocaleNow(code) {
-  const next = i18n.LOCALES.includes(code) ? code : i18n.DEFAULT_LOCALE;
-  if (next === petLocale) {
-    i18n.loadLocale(next);
-    return true;
-  }
-  if (!mainWindow || mainWindow.isDestroyed()) return false;
-  if (!beginShellOp('locale')) return false;
-
-  petLocale = next;
-  i18n.loadLocale(petLocale);
-  saveLocale();
-  try {
-    awareness.setLocale(petLocale);
-  } catch (err) {
-    logMain('setPetLocale awareness', err);
-  }
-  if (tray) updateTrayMenu();
-  notifyLocale();
+  // Legacy soft-pipe entry — Size/locale no longer use tray queue.
+  setPetLocale(code);
   return true;
 }
 
-function notifyPetSize() {
+function notifyPetSize(level = petSizeLevel) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.webContents.send('pet-size-level', petSizeLevel);
+  mainWindow.webContents.send('pet-size-level', normalizeSizeCase(level));
 }
 
+/**
+ * Size/ภาษา: จำดิสก์แล้ว relaunch+exit — ไม่ใช้ท่อ soft.
+ */
 function setPetSizeLevel(level) {
-  const next = Math.max(1, Math.min(8, Math.floor(Number(level) || 1)));
+  const next = normalizeSizeCase(level);
   if (next === petSizeLevel) return petSizeLevel;
-  enqueueTrayOp({ kind: 'size', value: next });
+  applySizeLevel(next);
+  saveSizeLevel();
+  relaunchForTraySettings('size');
   return petSizeLevel;
 }
 
 function setPetSizeLevelNow(level) {
-  const next = Math.max(1, Math.min(8, Math.floor(Number(level) || 1)));
-  if (next === petSizeLevel) return true;
-  if (!mainWindow || mainWindow.isDestroyed()) return false;
-  if (!beginShellOp('size')) return false;
-
-  applySizeLevel(next);
-  saveSizeLevel();
-  if (tray) updateTrayMenu();
-  notifyPetSize();
+  // Legacy soft-pipe entry — Size/locale no longer use tray queue.
+  setPetSizeLevel(level);
   return true;
 }
 
@@ -313,18 +349,21 @@ function beginShellOp(reason) {
   return true;
 }
 
-function endShellOp(token, _why) {
+function endShellOp(token, why, detail = '') {
   if (token != null && token !== shellBusyToken) return;
   if (!shellBusy) return;
 
   const finish = () => {
     if (token != null && token !== shellBusyToken) return;
+    settleSettingsPersist(why, detail);
     shellBusy = false;
     clearShellBusyTimers();
     notifyShellBusy(false);
     if (tray) updateTrayMenu();
     // Boot open→close: only then start awareness (no speak/poll fighting show pipe).
     tryStartAwarenessAfterShell();
+    // External tray ops wait behind shell — drain queue when free (Stage other only).
+    beginTrayPrepareIfNeeded();
   };
 
   const elapsed = Date.now() - shellBusyStartedAt;
@@ -332,6 +371,66 @@ function endShellOp(token, _why) {
     shellBusyMinTimer = setTimeout(finish, SHELL_BUSY_MIN_MS - elapsed);
   } else {
     finish();
+  }
+}
+
+/** Commit Size/locale only after successful rebootstrap; else rollback — no disk write of failed value. */
+function isSettingsCommitSuccess(kind, why, detail) {
+  if (why !== 'renderer') return false;
+  const d = String(detail || '');
+  if (kind === 'size') return d === 'size-rebootstrap';
+  if (kind === 'locale') return d === 'locale-rebootstrap';
+  return false;
+}
+
+function settleSettingsPersist(why, detail = '') {
+  const pending = settingsPersistPending;
+  if (!pending) return;
+  settingsPersistPending = null;
+
+  if (isSettingsCommitSuccess(pending.kind, why, detail)) {
+    if (pending.kind === 'size') {
+      petSizeLevel = pending.next;
+      applySizeGeometry(pending.next);
+      saveSizeLevel();
+    } else if (pending.kind === 'locale') {
+      petLocale = pending.next;
+      i18n.loadLocale(petLocale);
+      saveLocale();
+      try {
+        awareness.setLocale(petLocale);
+      } catch (err) {
+        logMain('settleSettingsPersist locale', err);
+      }
+    }
+    return;
+  }
+
+  // Failed / timeout / stale — restore committed value; do not keep tentative.
+  if (pending.kind === 'size') {
+    applySizeLevel(pending.previous);
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('pet-size-sync', pending.previous);
+      }
+    } catch (err) {
+      logMain('pet-size-sync rollback', err);
+    }
+  } else if (pending.kind === 'locale') {
+    petLocale = pending.previous;
+    i18n.loadLocale(petLocale);
+    try {
+      awareness.setLocale(petLocale);
+    } catch (err) {
+      logMain('settleSettingsPersist locale rollback', err);
+    }
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('pet-locale-sync', i18n.packForRenderer());
+      }
+    } catch (err) {
+      logMain('pet-locale-sync rollback', err);
+    }
   }
 }
 
@@ -367,22 +466,70 @@ function clearTrayPrepareTimer() {
 }
 
 /**
- * Tray show/hide/size/locale — one idle gate (drop if busy).
- * Soft pipe: pause → apply → resume → Show speech. Relaunch = manual Tray only.
+ * Hybrid external gate (Show + Awareness = same protect class):
+ * - Show / Awareness → refuse (do not take value into pending)
+ * - Stage other → enqueue; pet hard-cuts walk/casual speak then apply
+ * - shellBusy → queue behind endShellOp (drain), never drop mid-apply intent
+ */
+function isAwarenessProtected() {
+  if (awarenessGateActive) return true;
+  try {
+    return typeof awareness.isAwarenessStageActive === 'function'
+      && !!awareness.isAwarenessStageActive();
+  } catch (_) {
+    return false;
+  }
+}
+
+function isProtectedExternalStage() {
+  return !!showSpeechActive || isAwarenessProtected();
+}
+
+/**
+ * Only entry for external tray show/hide/size/locale.
+ * @returns {boolean} true if accepted into pipe/queue
+ */
+function acceptExternalTrayOp(op) {
+  if (!op || !op.kind) return false;
+  if (isProtectedExternalStage()) {
+    // Refuse: Show/Awareness — ignore input entirely (no pending, no tentative).
+    closeTrayMenuIfOpen();
+    return false;
+  }
+  enqueueTrayOp(op);
+  return true;
+}
+
+/**
+ * Tray show/hide/size/locale — one pending slot (latest wins) for Stage other / shell drain.
+ * Soft pipe after prepare: pause → apply → resume → Show. Relaunch = manual Tray only.
  */
 function enqueueTrayOp(op) {
   if (!op || !op.kind) return;
-
-  if (shellBusy) {
-    if (tray) updateTrayMenu();
-    return;
-  }
-  if (trayPrepareWaiting) {
-    if (tray) updateTrayMenu();
+  if (isProtectedExternalStage()) {
+    dropPendingTrayOp();
     return;
   }
 
+  // Latest external intent wins (overwrite). Keep waiting if prepare already running.
   pendingTrayOp = op;
+  if (tray) updateTrayMenu();
+
+  if (shellBusy || trayPrepareWaiting) {
+    return;
+  }
+
+  beginTrayPrepareIfNeeded();
+}
+
+/** Start prepare when there is a pending op and shell is free. */
+function beginTrayPrepareIfNeeded() {
+  if (!pendingTrayOp || shellBusy || trayPrepareWaiting) return;
+  if (isProtectedExternalStage()) {
+    dropPendingTrayOp();
+    return;
+  }
+
   trayPrepareWaiting = true;
   clearTrayPrepareTimer();
   if (tray) updateTrayMenu();
@@ -403,12 +550,13 @@ function enqueueTrayOp(op) {
     dropPendingTrayOp();
     return;
   }
-  // Dead renderer only — drop, never force-apply mid-stage.
+  // General stage hard-cut should finish fast; timeout = stuck → refuse leftover.
   trayPrepareTimer = setTimeout(() => {
     trayPrepareTimer = null;
     if (!trayPrepareWaiting) return;
+    logMain('tray prepare timeout', new Error('general hard-cut exceeded'));
     dropPendingTrayOp();
-  }, 3000);
+  }, 8000);
 }
 
 function dropPendingTrayOp() {
@@ -425,8 +573,14 @@ function onTrayIdleReady() {
     if (tray) updateTrayMenu();
     return;
   }
-  if (shellBusy) {
+  if (isProtectedExternalStage()) {
+    // Show/Awareness seized during prepare — refuse stale value.
     dropPendingTrayOp();
+    return;
+  }
+  if (shellBusy) {
+    // Keep pending — endShellOp will beginTrayPrepareIfNeeded.
+    if (tray) updateTrayMenu();
     return;
   }
 
@@ -434,6 +588,8 @@ function onTrayIdleReady() {
   pendingTrayOp = null;
   const ok = executeTrayOp(op);
   if (!ok && tray) updateTrayMenu();
+  // If execute failed to begin shell, allow another queued op later.
+  if (!ok) beginTrayPrepareIfNeeded();
 }
 
 function onTrayIdleReject() {
@@ -449,9 +605,12 @@ function executeTrayOp(op) {
     case 'hide':
       return hidePetWindowNow();
     case 'size':
-      return setPetSizeLevelNow(op.value);
+      // Should not be queued anymore — if leftover, same as direct: save + relaunch.
+      setPetSizeLevel(op.value);
+      return true;
     case 'locale':
-      return setPetLocaleNow(op.value);
+      setPetLocale(op.value);
+      return true;
     default:
       return true;
   }
@@ -519,39 +678,172 @@ function restorePetWindowShell(win) {
   if (typeof win.setVisibleOnAllWorkspaces === 'function') {
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   }
-  try {
-    if (win.isFocused()) win.blur();
-  } catch (_) { /* ignore */ }
+  // Do NOT blur here — blur re-enters focus/blur handlers and can freeze mid locale/size pipe.
   // alwaysOnTop is boot-only — never re-applied here.
+}
+
+/** Suppress focus/blur storm while we strip caption or reassert. */
+let suppressOsTouch = false;
+let osTouchHeavyTimer = null;
+
+function withOsTouchSuppressed(fn) {
+  suppressOsTouch = true;
+  try {
+    fn();
+  } finally {
+    setTimeout(() => {
+      suppressOsTouch = false;
+    }, 80);
+  }
+}
+
+/**
+ * Caption strip only — no pet-force-input, no opacity/mouse punch (does not touch pet pipe).
+ * Used after tray menu close and on OS focus chrome redraw.
+ */
+function stripCaptionOnly(win = mainWindow) {
+  if (!win || win.isDestroyed()) return;
+  withOsTouchSuppressed(() => {
+    try {
+      win.setMenu(null);
+      win.setTitle('');
+      win.setSkipTaskbar(true);
+      win.setFocusable(false);
+    } catch (_) { /* ignore */ }
+  });
+}
+
+function scheduleCaptionStripOnly() {
+  for (const ms of [0, 30, 100, 220]) {
+    setTimeout(() => stripCaptionOnly(), ms);
+  }
+}
+
+/**
+ * After tray click, sticky Windows caption clears when user hide→show.
+ * Do the same visually when safe — no shellBusy, no pet-visibility IPC, no Show speech.
+ */
+let captionSoftRefreshTimer = null;
+let captionSoftRefreshRunning = false;
+
+function canCaptionSoftHideShow() {
+  if (captionSoftRefreshRunning) return false;
+  if (shellBusy || suppressOsTouch) return false;
+  if (isProtectedExternalStage()) return false;
+  if (petVisuallyHidden) return false;
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  return true;
+}
+
+function scheduleCaptionSoftHideShow() {
+  if (captionSoftRefreshTimer) {
+    clearTimeout(captionSoftRefreshTimer);
+    captionSoftRefreshTimer = null;
+  }
+  // Let menu dismiss + OS activate settle, then micro hide→show.
+  captionSoftRefreshTimer = setTimeout(() => {
+    captionSoftRefreshTimer = null;
+    runCaptionSoftHideShow();
+  }, 80);
+}
+
+function runCaptionSoftHideShow() {
+  if (!canCaptionSoftHideShow()) {
+    scheduleCaptionStripOnly();
+    return;
+  }
+
+  const win = mainWindow;
+  captionSoftRefreshRunning = true;
+
+  withOsTouchSuppressed(() => {
+    try {
+      // Visual-only hide — do not set petVisuallyHidden / do not IPC pause stages.
+      applyHiddenVisual(win);
+      restorePetWindowShell(win);
+    } catch (err) {
+      logMain('caption soft hide', err);
+    }
+  });
+
+  setTimeout(() => {
+    try {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+
+      // User hid for real while we blinked — stay hidden.
+      if (petVisuallyHidden) {
+        applyHiddenVisual(mainWindow);
+        return;
+      }
+      // Stage became protected / shell busy — strip title only, do not force show pipe.
+      if (shellBusy || isProtectedExternalStage()) {
+        scheduleCaptionStripOnly();
+        return;
+      }
+
+      withOsTouchSuppressed(() => {
+        restorePetWindowShell(mainWindow);
+        applyVisibleVisual(mainWindow);
+        restorePetWindowBounds(mainWindow);
+      });
+      scheduleCaptionStripOnly();
+    } catch (err) {
+      logMain('caption soft show', err);
+      try {
+        if (mainWindow && !mainWindow.isDestroyed() && !petVisuallyHidden) {
+          applyVisibleVisual(mainWindow);
+        }
+      } catch (_) { /* ignore */ }
+    } finally {
+      captionSoftRefreshRunning = false;
+    }
+  }, 60);
 }
 
 /**
  * UX: thin OS title/caption bar on the pet window itself ("Preview" strip above bubble).
- * Tray right-click can activate the window and Windows redraws that chrome — re-strip it.
+ * Prefer scheduleCaptionStripOnly / stripCaptionOnly — avoid full shell restore from tray.
  */
 function hideWindowCaptionChrome(win = mainWindow) {
-  if (!win || win.isDestroyed()) return;
-  restorePetWindowShell(win);
+  stripCaptionOnly(win);
 }
 
 function hideWindowCaptionChromeBurst() {
-  hideWindowCaptionChrome();
-  for (const ms of [0, 16, 50, 120, 250]) {
-    setTimeout(() => hideWindowCaptionChrome(), ms);
-  }
+  scheduleCaptionStripOnly();
 }
 
 /** Re-apply shell + soft-hide/show visual after Windows taskbar/OS touches the window. */
 function reassertPetSurface(win = mainWindow) {
   if (!win || win.isDestroyed()) return;
-  restorePetWindowShell(win);
-  if (petVisuallyHidden) {
-    applyHiddenVisual(win);
-  } else {
-    applyVisibleVisual(win);
-    // Cursor/hover can work while renderer click flags stay locked — force unlock.
-    win.webContents.send('pet-force-input');
-  }
+  withOsTouchSuppressed(() => {
+    restorePetWindowShell(win);
+    if (petVisuallyHidden) {
+      applyHiddenVisual(win);
+    } else {
+      applyVisibleVisual(win);
+      // Cursor/hover can work while renderer click flags stay locked — force unlock.
+      try {
+        win.webContents.send('pet-force-input');
+      } catch (_) { /* ignore */ }
+    }
+  });
+}
+
+/**
+ * Heavy OS recover (show/restore/minimize). Skip while shellBusy so locale/size pipe cannot freeze.
+ * Debounced — focus/blur must NOT call this (caption-only instead).
+ */
+function onOsTouchHeavy() {
+  if (suppressOsTouch || shellBusy) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (osTouchHeavyTimer) clearTimeout(osTouchHeavyTimer);
+  osTouchHeavyTimer = setTimeout(() => {
+    osTouchHeavyTimer = null;
+    if (suppressOsTouch || shellBusy) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    reassertPetSurface(mainWindow);
+    scheduleCaptionStripOnly();
+  }, 120);
 }
 
 function notifyMovementLock() {
@@ -710,11 +1002,11 @@ function exitDragMode(win) {
 }
 
 function hidePetWindow() {
-  enqueueTrayOp({ kind: 'hide' });
+  acceptExternalTrayOp({ kind: 'hide' });
 }
 
 function showPetWindow() {
-  enqueueTrayOp({ kind: 'show' });
+  acceptExternalTrayOp({ kind: 'show' });
 }
 
 /** @returns {boolean} */
@@ -854,31 +1146,37 @@ function createWindow() {
     event.preventDefault();
   });
 
-  // Topic B: if Windows taskbar/icons touch this window, re-cover visual+input (same pipe).
-  const onOsTouch = () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    reassertPetSurface(mainWindow);
-  };
-
-  mainWindow.on('show', onOsTouch);
-  mainWindow.on('restore', onOsTouch);
+  // Topic B: OS touch recover — heavy only on show/restore/minimize.
+  // focus/blur = caption strip only (no pet-force-input) to avoid freeze loops mid locale pipe.
+  mainWindow.on('show', () => onOsTouchHeavy());
+  mainWindow.on('restore', () => onOsTouchHeavy());
   mainWindow.on('focus', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    try {
-      mainWindow.blur();
-    } catch (err) {
-      logMain('blur after OS focus', err);
+    if (suppressOsTouch || shellBusy) {
+      stripCaptionOnly();
+      return;
     }
-    onOsTouch();
+    withOsTouchSuppressed(() => {
+      try {
+        if (mainWindow.isFocused()) mainWindow.blur();
+      } catch (err) {
+        logMain('blur after OS focus', err);
+      }
+    });
+    scheduleCaptionStripOnly();
   });
-  mainWindow.on('blur', onOsTouch);
+  mainWindow.on('blur', () => {
+    // Caption only — never reassert here (blur↔reassert was the freeze loop).
+    if (suppressOsTouch) return;
+    scheduleCaptionStripOnly();
+  });
 
   mainWindow.on('minimize', (e) => {
     e.preventDefault();
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.showInactive();
-      onOsTouch();
+      onOsTouchHeavy();
     }
   });
 
@@ -951,15 +1249,22 @@ function launchUninstaller() {
   });
 }
 
-/** Steam/Roblox-like: no popup while shell/prepare/Show speech — icon+tooltip stay. */
+/**
+ * Steam/Roblox-like: no popup while shell apply (show/hide mid-pipe).
+ * Show/Awareness may open menu — Size/locale relaunch; show/hide still refuse at accept gate.
+ */
 function isTrayMenuAllowed() {
-  return !shellBusy && !trayPrepareWaiting && !showSpeechActive;
+  return !shellBusy;
+}
+
+/** show/hide soft gate (Hybrid). Size/locale do not use this — they relaunch. */
+function isTraySettingsAllowed() {
+  return !shellBusy && !isProtectedExternalStage();
 }
 
 function closeTrayMenuIfOpen() {
   if (!tray) {
     trayMenuOpen = false;
-    hideWindowCaptionChromeBurst();
     return;
   }
   try {
@@ -968,12 +1273,13 @@ function closeTrayMenuIfOpen() {
     logMain('closeContextMenu', err);
   }
   trayMenuOpen = false;
-  hideWindowCaptionChromeBurst();
 }
 
 function buildTrayContextMenu() {
   const startupEnabled = app.getLoginItemSettings().openAtLogin;
   const t = (key, vars) => i18n.tray(key, vars);
+  // Size/locale always enabled when menu opens — save + relaunch (no soft pipe).
+  // show/hide still Hybrid-gated inside acceptExternalTrayOp.
 
   return Menu.buildFromTemplate([
     {
@@ -987,7 +1293,10 @@ function buildTrayContextMenu() {
     { type: 'separator' },
     {
       label: t('size'),
-      submenu: [1, 2, 3, 4, 5, 6, 7, 8].map((n) => ({
+      submenu: Array.from(
+        { length: SIZE_CASE_MAX - SIZE_CASE_MIN + 1 },
+        (_, i) => SIZE_CASE_MIN + i,
+      ).map((n) => ({
         label: n === 1 ? t('sizeDefault', { n }) : t('sizeN', { n }),
         type: 'radio',
         checked: petSizeLevel === n,
@@ -996,26 +1305,12 @@ function buildTrayContextMenu() {
     },
     {
       label: t('language'),
-      submenu: [
-        {
-          label: t('langTh'),
-          type: 'radio',
-          checked: petLocale === 'th',
-          click: () => setPetLocale('th'),
-        },
-        {
-          label: t('langEn'),
-          type: 'radio',
-          checked: petLocale === 'en',
-          click: () => setPetLocale('en'),
-        },
-        {
-          label: t('langZh'),
-          type: 'radio',
-          checked: petLocale === 'zh',
-          click: () => setPetLocale('zh'),
-        },
-      ],
+      submenu: LOCALE_CASES.map((code) => ({
+        label: code === 'th' ? t('langTh') : code === 'en' ? t('langEn') : t('langZh'),
+        type: 'radio',
+        checked: petLocale === code,
+        click: () => setPetLocale(code),
+      })),
     },
     {
       label: t('lock'),
@@ -1056,28 +1351,29 @@ function buildTrayContextMenu() {
   ]);
 }
 
-/** One open only: busy / already open → ignore right-click (no stacked panel). */
+/**
+ * Tray right-click = open panel only (Steam/Discord-like).
+ * No pet shell / IPC / settings — values only from MenuItem click handlers.
+ * Not ready or menu already open → pure return.
+ * After menu closes: soft hide→show visual blink when safe (clears sticky caption).
+ */
 function openTrayMenuOnce() {
   if (!tray || trayMenuOpen || !isTrayMenuAllowed()) {
-    hideWindowCaptionChrome();
     return;
   }
-
-  hideWindowCaptionChrome();
 
   const menu = buildTrayContextMenu();
   trayMenuOpen = true;
   menu.once('menu-will-close', () => {
     trayMenuOpen = false;
-    // Tray close often activates pet window → OS paints thin title strip above bubble.
-    hideWindowCaptionChromeBurst();
+    // Same idea as user hide→show clearing caption — visual-only when safe.
+    scheduleCaptionSoftHideShow();
   });
 
   try {
     tray.popUpContextMenu(menu);
   } catch (err) {
     trayMenuOpen = false;
-    hideWindowCaptionChromeBurst();
     logMain('popUpContextMenu', err);
   }
 }
@@ -1217,8 +1513,8 @@ function setupIpc() {
     return i18n.packForRenderer();
   });
 
-  ipcMain.handle('shell-ready', () => {
-    endShellOp(shellBusyToken, 'renderer');
+  ipcMain.handle('shell-ready', (_event, reason) => {
+    endShellOp(shellBusyToken, 'renderer', String(reason || ''));
     return true;
   });
 
@@ -1234,6 +1530,20 @@ function setupIpc() {
 
   ipcMain.handle('show-speech-gate', (_event, active) => {
     showSpeechActive = !!active;
+    if (showSpeechActive) {
+      // Show owns stage — refuse any queued external value.
+      dropPendingTrayOp();
+    }
+    if (tray) updateTrayMenu();
+    return true;
+  });
+
+  ipcMain.handle('awareness-gate', (_event, active) => {
+    awarenessGateActive = !!active;
+    if (awarenessGateActive) {
+      // Awareness owns stage (same class as Show) — refuse queued external value.
+      dropPendingTrayOp();
+    }
     if (tray) updateTrayMenu();
     return true;
   });
@@ -1241,6 +1551,7 @@ function setupIpc() {
   /** Tray pipe fresh start — clear sticky show gate + general awareness speak. */
   ipcMain.handle('stage-hard-reset', () => {
     showSpeechActive = false;
+    // Do not clear awarenessGateActive here — porn/awareness mid-flight stays protected.
     if (tray) updateTrayMenu();
     try {
       awareness.resetGeneralSpeakLock();
@@ -1323,6 +1634,10 @@ if (gotLock) {
         app.quit();
       },
       isShowSpeechActive: () => showSpeechActive,
+      onExternalRefuseNeeded: () => {
+        dropPendingTrayOp();
+        if (tray) updateTrayMenu();
+      },
     });
     try {
       awareness.setLocale(petLocale);

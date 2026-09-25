@@ -141,6 +141,8 @@ let getMainWindow = null;
 let onForceQuit = null;
 /** @type {null | (() => boolean)} */
 let isShowSpeechActive = null;
+/** @type {null | (() => void)} Called when awareness owns stage — main drops external pending. */
+let onExternalRefuseNeeded = null;
 let pollTimer = null;
 let polling = false;
 let speakingBusy = false;
@@ -253,6 +255,12 @@ function clearSpeakSafetyTimer() {
   }
 }
 
+function notifyExternalRefuse() {
+  try {
+    if (typeof onExternalRefuseNeeded === 'function') onExternalRefuseNeeded();
+  } catch (_) { /* ignore */ }
+}
+
 function flushSpeakQueue() {
   if (speakingBusy) return;
   const next = speakQueue.shift();
@@ -285,6 +293,7 @@ function requestSpeak(text, thenQuit, opts = {}) {
   }
 
   speakingBusy = true;
+  notifyExternalRefuse();
   clearSpeakSafetyTimer();
   const keepPriority = !!opts.keepPriority;
   const ok = sendToRenderer('awareness-speak', {
@@ -515,6 +524,7 @@ function startPornComplaintSequence() {
   if (pornSequenceActive || speakingBusy) return;
 
   pornSequenceActive = true;
+  notifyExternalRefuse();
   lastPornDetectAt = Date.now();
   const cats = i18n.getAwarenessCategories();
   state.pornRound = Math.max(1, cats.length);
@@ -777,6 +787,7 @@ function stopPolling() {
  * @param {() => import('electron').BrowserWindow|null} opts.getMainWindow
  * @param {() => void} opts.forceQuit
  * @param {() => boolean} [opts.isShowSpeechActive] true while soft-show intro runs
+ * @param {() => void} [opts.onExternalRefuseNeeded] drop tray pending when awareness owns stage
  */
 function init(opts) {
   appRef = opts.app;
@@ -784,6 +795,9 @@ function init(opts) {
   onForceQuit = opts.forceQuit;
   isShowSpeechActive = typeof opts.isShowSpeechActive === 'function'
     ? opts.isShowSpeechActive
+    : null;
+  onExternalRefuseNeeded = typeof opts.onExternalRefuseNeeded === 'function'
+    ? opts.onExternalRefuseNeeded
     : null;
   loadState();
 }
@@ -838,6 +852,11 @@ function resetGeneralSpeakLock() {
   speakQueue = [];
 }
 
+/** External tray gate: awareness owns stage (same protect class as Show intro). */
+function isAwarenessStageActive() {
+  return speakingBusy || pornSequenceActive || speakQueue.length > 0;
+}
+
 module.exports = {
   init,
   evaluateBoot,
@@ -850,6 +869,7 @@ module.exports = {
   clearBanState,
   notifySpeechFinished,
   resetGeneralSpeakLock,
+  isAwarenessStageActive,
   setLocale,
   GRACE_MS,
   LOAD_THRESHOLD,

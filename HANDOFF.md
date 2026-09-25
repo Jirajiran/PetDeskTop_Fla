@@ -28,29 +28,28 @@ Build Setup → รากโปรเจกต์: `npm run dist`
 
 ## สถานะงานตอนส่งต่อ (อัปเดตเมื่อส่งต่อ)
 
-**ล่าสุดที่ทำแล้ว (V34 ship)**
-- Tray ไม่ว่าง → ไม่เปิดเมนู; เปิดเมนูได้ครั้งเดียว (`trayMenuOpen` + `popUpContextMenu`)
-- Size / ภาษา = soft pipe; รีสตาร์ท = ปุ่ม Tray ด้วยมือเท่านั้น
-- Lock ≠ ซ่อนคลิกเดียว (multi-tap เหมือนปลดล็อก)
-- System load quit: เกณฑ์ 90 + ค้างต่อเนื่อง 15s (หลุดลง = รีเซ็ตตัวนับ)
-- กันแถบชื่อบนหน้าต่าง pet (`thickFrame: false`, `page-title-updated`, caption burst หลัง Tray)
+**ล่าสุดที่ทำแล้ว (V34 — Size/ภาษา relaunch + caption soft blink)**
+- **Size / ภาษา** = จำดิสก์ → `app.relaunch()` → `app.exit(0)`
+- **แสดง / ซ่อน** = soft + Hybrid
+- หลังปิดเมนูถาด = **soft hide→show ภาพ** เมื่อปลอดภัย (เคลียร์ caption) — ไม่บท Show
 
 **ยังเปิดอยู่ (รอบถัดไปได้)**
-- Awareness ครอบคลุม sleep / warp ตอน own stage หรือยัง
-- แถบชื่อบนหน้าต่าง pet หลัง Tray — ทดสอบต่อถ้ายังโผล่
-- อย่า commit `node_modules`, `win-unpacked`, `.blockmap` โดยไม่ถาม
+- ทดสอบคลิกถาดซ้ำ: แถบเทาหายหลังเมนูปิด โดยไม่ค้างท่อ / ไม่พูดแนะนำตัวซ้ำ
+- ทดสอบ Size/ภาษา relaunch ยังปกติ
+- อย่า commit `node_modules`, `win-unpacked` โดยไม่ถาม / รีบิลด์ Setup
 - Push GitHub = ผู้ใช้ทำเอง
 
 ---
 
 ## ความนึกหลัก (สั้นๆ)
 
-1. **Loading / shellBusy สำคัญสุด** — คำสั่งซ้อน = บัค; busy = ไม่เปิดเมนูถาด  
-2. **ท่อเดียว** — ซ่อนแสดง · Size · ภาษา = pause → apply → resume → พูด Show  
-3. **i18n JSON** — เรียงหมวด; Show ไม่รวมหมวดท้าย; Awareness รวมท้าย = ลา  
-4. **Awareness** พูดครบคิวแบบ force แม้ซ่อน/ลาก/เดิน  
-5. **AOT boot-only** — ห้ามสลับ always-on-top ตอน show/hide  
-6. **Relaunch** = ทางหนีสุดท้ายจาก Tray เท่านั้น
+1. **Loading / shellBusy สำคัญสุด** สำหรับ show/hide  
+2. **Size/ภาษา = save + relaunch + exit** — ไม่ soft  
+3. **แสดง/ซ่อน = ท่อ soft** Hybrid ตาม Stage  
+4. **i18n JSON** — เรียงหมวด; Show ไม่รวมหมวดท้าย; Awareness รวมท้าย = ลา  
+5. **Awareness** พูดครบคิวแบบ force  
+6. **AOT boot-only**  
+7. **relaunch อย่างเดียวไม่พอ** — ต้อง exit ด้วย
 
 รายละเอียดกฎเต็ม → `.cursor/rules/fla-pet-desktop.mdc`
 
@@ -62,7 +61,7 @@ Build Setup → รากโปรเจกต์: `npm run dist`
 |--------|------|
 | Tray, soft-hide, shellBusy | `source/main.js` |
 | Pet, drag, Show speak, rebootstrap | `source/pet.js` |
-| Awareness poll / ban | `source/awareness.js` |
+| App awareness | `source/awareness.js` |
 | Locale packs | `source/i18n.js`, `source/i18n/*.json` |
 | IPC bridge | `source/preload.js` |
 
