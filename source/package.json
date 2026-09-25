@@ -1,7 +1,7 @@
 {
   "name": "fla-pet-desktop",
-  "version": "32.0.0",
-  "description": "Fla_petDesktop_V32 — desktop pet",
+  "version": "34.0.0",
+  "description": "Fla_petDesktop_V34 — desktop pet (SVG poses)",
   "main": "main.js",
   "author": "Fla",
   "scripts": {
@@ -15,7 +15,7 @@
   },
   "build": {
     "appId": "com.fla.petdesktop",
-    "productName": "Fla_petDesktop_V32",
+    "productName": "Fla_petDesktop_V34",
     "copyright": "Copyright © Fla",
     "directories": {
       "output": "..",
@@ -25,10 +25,14 @@
       "main.js",
       "preload.js",
       "pet.js",
+      "awareness.js",
+      "i18n.js",
+      "i18n/*.json",
       "index.html",
       "style.css",
-      "PetPicture/**/*",
-      "Sound/**/*"
+      "PetPicture/PetDesignSVG.svg",
+      "Sound/**/*",
+      "build/icon.png"
     ],
     "asar": true,
     "win": {
@@ -41,7 +45,7 @@
         }
       ],
       "icon": "build/icon.png",
-      "artifactName": "Fla_petDesktop_V32-Setup-${version}.${ext}"
+      "artifactName": "Fla_petDesktop_V34-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -50,7 +54,7 @@
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",
-      "shortcutName": "Fla_petDesktop_V32",
+      "shortcutName": "Fla_petDesktop_V34",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "runAfterFinish": true,

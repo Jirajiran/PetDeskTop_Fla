@@ -12,9 +12,21 @@ contextBridge.exposeInMainWorld('petAPI', {
   exitDragMode: () => ipcRenderer.invoke('exit-drag-mode'),
   setStartup: (enabled) => ipcRenderer.invoke('set-startup', enabled),
   getStartup: () => ipcRenderer.invoke('get-startup'),
+  getMovementLock: () => ipcRenderer.invoke('get-movement-lock'),
+  setMovementLock: (enabled) => ipcRenderer.invoke('set-movement-lock', enabled),
+  getPetSizeLevel: () => ipcRenderer.invoke('get-pet-size-level'),
+  setPetSizeLevel: (level) => ipcRenderer.invoke('set-pet-size-level', level),
+  getLocale: () => ipcRenderer.invoke('get-locale'),
+  setLocale: (code) => ipcRenderer.invoke('set-locale', code),
   quitApp: () => ipcRenderer.invoke('quit-app'),
   snooze: (ms) => ipcRenderer.invoke('snooze', ms),
   restoreWindowShell: () => ipcRenderer.invoke('restore-window-shell'),
+  awarenessSpeechDone: (thenQuit) => ipcRenderer.invoke('awareness-speech-done', !!thenQuit),
+  shellReady: (reason) => ipcRenderer.invoke('shell-ready', reason || ''),
+  trayIdleReady: () => ipcRenderer.invoke('tray-idle-ready'),
+  trayIdleReject: () => ipcRenderer.invoke('tray-idle-reject'),
+  setShowSpeechGate: (active) => ipcRenderer.invoke('show-speech-gate', !!active),
+  stageHardReset: () => ipcRenderer.invoke('stage-hard-reset'),
   onScreenChanged: (callback) => {
     ipcRenderer.on('screen-changed', () => callback());
   },
@@ -23,5 +35,26 @@ contextBridge.exposeInMainWorld('petAPI', {
   },
   onForceInput: (callback) => {
     ipcRenderer.on('pet-force-input', () => callback());
+  },
+  onMovementLock: (callback) => {
+    ipcRenderer.on('pet-movement-lock', (_event, locked) => callback(!!locked));
+  },
+  onPetSizeLevel: (callback) => {
+    ipcRenderer.on('pet-size-level', (_event, level) => callback(level));
+  },
+  onLocale: (callback) => {
+    ipcRenderer.on('pet-locale', (_event, pack) => callback(pack || {}));
+  },
+  onShellBusy: (callback) => {
+    ipcRenderer.on('pet-shell-busy', (_event, busy) => callback(!!busy));
+  },
+  onTrayPrepare: (callback) => {
+    ipcRenderer.on('pet-tray-prepare', () => callback());
+  },
+  onAwarenessSpeak: (callback) => {
+    ipcRenderer.on('awareness-speak', (_event, payload) => callback(payload || {}));
+  },
+  onAwarenessForceQuit: (callback) => {
+    ipcRenderer.on('awareness-force-quit', () => callback());
   },
 });

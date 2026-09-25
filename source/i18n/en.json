@@ -1,0 +1,131 @@
+{
+  "locale": "en",
+  "meta": { "name": "English", "logline": "greet → intro → chat → leave" },
+  "tray": {
+    "show": "Show Pet",
+    "hide": "Hide Pet",
+    "size": "Pet Size",
+    "sizeDefault": "Size {n} (default)",
+    "sizeN": "Size {n}",
+    "lock": "Stay put",
+    "startup": "Start with Windows",
+    "language": "Language",
+    "langTh": "ไทย",
+    "langEn": "English",
+    "langZh": "中文",
+    "relaunch": "Relaunch App",
+    "uninstall": "Uninstall",
+    "quit": "Quit",
+    "uninstallMissing": "Uninstaller not found",
+    "uninstallFail": "Could not open uninstaller:\n{err}"
+  },
+  "categories": [
+    {
+      "id": "greet",
+      "phrases": [
+        "Hi, I'm Fla",
+        "Hello",
+        "How's it going?",
+        "Hey there",
+        "Nice to meet you"
+      ]
+    },
+    {
+      "id": "intro",
+      "phrases": [
+        "I'm your friendly neighbor",
+        "I'll be right here",
+        "Let's be friends",
+        "Just call me Fla"
+      ]
+    },
+    {
+      "id": "chat",
+      "phrases": [
+        "What are you up to today?",
+        "Busy today?",
+        "A little break is nice",
+        "Anything fun going on?"
+      ]
+    },
+    {
+      "id": "leave",
+      "phrases": [
+        "I'm out of here",
+        "That's enough — bye",
+        "I'll take my leave",
+        "I can't — see you",
+        "Not watching — I'm gone"
+      ]
+    }
+  ],
+  "pools": {
+    "idle": [
+      "Hello!",
+      "Nice day today",
+      "Don't forget to rest",
+      "Working hard, huh~",
+      "Need any help?",
+      "You got this!",
+      "Hungry yet?",
+      "Smile a little~",
+      "How's your day?",
+      "Rest your eyes a bit"
+    ],
+    "drag": [
+      "I don't like being dragged",
+      "That hurts",
+      "Please be gentle"
+    ],
+    "banComplain": [
+      "Again?",
+      "I told you already",
+      "I'm not joining in",
+      "Still not stopping?",
+      "I'm not playing along",
+      "Enough already"
+    ],
+    "loadHeavy": [
+      "Too heavy — I'm leaving",
+      "PC's too hot — taking a break",
+      "Load's crazy — gotta go",
+      "Too much — see you later",
+      "I can't take it — bye"
+    ],
+    "shock": [
+      "What are you doing?!",
+      "Wait, what is that?",
+      "I saw that",
+      "Hmm...",
+      "Hey — what is this?!"
+    ],
+    "complain": [
+      "I'm right here",
+      "Don't do that",
+      "You shouldn't",
+      "I see everything",
+      "Please stop"
+    ]
+  },
+  "apps": {
+    "youtube-music": ["What song is that?", "Nice track", "Listening to music?", "Sounds great"],
+    "youtube": ["What are you watching today?", "Which clip?", "YouTube, huh — fun?", "Anything good?"],
+    "google": ["What are you searching today?", "Looking something up?", "Tell me what you need", "Interesting search"],
+    "facebook": ["On Facebook?", "Anything new in the feed?", "Scrolling away?", "Chatting with someone?"],
+    "twitter": ["Tweeting?", "Checking the timeline?", "Any drama?", "Scrolling X a lot"],
+    "instagram": ["On Instagram?", "Whose story is that?", "Reels forever?", "Nice post"],
+    "tiktok": ["On TikTok?", "Short clips forever", "What dance is that?", "Can't stop scrolling"],
+    "discord": ["On Discord?", "Friends calling?", "Which server?", "Chatty day?"],
+    "steam": ["What game today?", "Opening Steam?", "Any new games?", "Wanna play together?"],
+    "spotify": ["What song is that?", "Spotify vibes", "Which playlist?", "Good track?"],
+    "netflix": ["What series?", "Netflix night?", "Is this episode good?", "Movie time?"],
+    "twitch": ["Whose stream?", "Twitch vibes", "Chat going wild?", "Favorite streamer?"],
+    "line": ["LINE with who?", "New messages?", "Nice chat?", "Cute sticker"],
+    "reddit": ["On Reddit?", "Which sub?", "Any funny memes?", "Feed scrolling"],
+    "whatsapp": ["On WhatsApp?", "Who texted?", "Nice chat?", "Any news?"],
+    "telegram": ["Telegram open?", "Chatting with who?", "Got a file?", "Deep chat"],
+    "vscode": ["Coding?", "Where's the bug?", "Nice focus", "Rest your eyes"],
+    "chrome": ["What are you doing in Chrome?", "Browsing away?", "So many tabs", "Looking something up?"],
+    "edge": ["On Edge?", "Browsing away?", "Too many tabs?", "What are you looking at?"]
+  }
+}

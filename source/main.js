@@ -11,22 +11,219 @@ const {
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const awareness = require('./awareness');
+const i18n = require('./i18n');
 
-const APP_NAME = 'Fla_petDesktop_V32';
-const APP_VERSION = '32.0.0';
-const PET_SIZE = 72;
-const WINDOW_WIDTH = 88;
-const WINDOW_HEIGHT = 120;
+const APP_NAME = 'Fla_petDesktop_V34';
+const APP_VERSION = '34.0.0';
+/** Size 1 = original footprint (before 200px experiment). */
+const BASE_PET_SIZE = 72;
+const BASE_WINDOW_WIDTH = 88;
+const BASE_WINDOW_HEIGHT = 120;
 const ALWAYS_ON_TOP_LEVEL = 'screen-saver';
+const LOCALE_FILE = 'pet-locale.json';
+const SIZE_FILE = 'pet-size.json';
 
 let mainWindow = null;
+/** @type {{ action: string, text?: string }} */
+let awarenessBoot = { action: 'run' };
 let tray = null;
 let snoozeTimer = null;
 let snoozeResolve = null;
 let dragMoveListener = null;
-/** Soft-hide: opacity 0 + bottom layer (window stays alive, not BrowserWindow.hide). */
+/** Soft-hide: opacity 0 + ignore-mouse (window stays alive, not BrowserWindow.hide). Always-on-top stays on. */
 let petVisuallyHidden = false;
+/** Set once at boot — never re-toggled on show/hide (toggling pulls other apps forward on Windows). */
+let alwaysOnTopBooted = false;
 let mouseAcceptTimers = [];
+/** Tray lock: pet stays put (no AI pathing); drag still allowed. */
+let movementLocked = false;
+/** Tray Size 1..8 — scale = 1 + (level-1)*0.2 */
+let petSizeLevel = 1;
+let PET_SIZE = BASE_PET_SIZE;
+let WINDOW_WIDTH = BASE_WINDOW_WIDTH;
+let WINDOW_HEIGHT = BASE_WINDOW_HEIGHT;
+/** th | en | zh */
+let petLocale = i18n.DEFAULT_LOCALE;
+/** Drop rapid tray/IPC while show/hide/size/locale settle. */
+let shellBusy = false;
+let shellBusyToken = 0;
+let shellBusyTimer = null;
+let shellBusyMinTimer = null;
+let shellBusyStartedAt = 0;
+const SHELL_BUSY_MIN_MS = 700;
+const SHELL_BUSY_MAX_MS = 12000;
+/**
+ * Tray gate: one shot check — idle → run pipe; else DROP (return, no queue / no wait).
+ * @type {null | { kind: 'show' | 'hide' | 'size' | 'locale', value?: any }}
+ */
+let pendingTrayOp = null;
+let trayPrepareWaiting = false;
+let trayPrepareTimer = null;
+/** Tray popup is single-flight — second right-click while open does not stack another menu. */
+let trayMenuOpen = false;
+/** Boot: awareness waits until first show shellBusy closes (open→close pair). */
+let rendererLoaded = false;
+let awarenessStarted = false;
+let bootShowStarted = false;
+/** Soft-show intro (แนะนำตัว) — blocks general awareness; porn ignores this. */
+let showSpeechActive = false;
+
+function roundHalfUp(x) {
+  return Math.floor(Number(x) + 0.5);
+}
+
+function applySizeLevel(level) {
+  petSizeLevel = Math.max(1, Math.min(8, Math.floor(Number(level) || 1)));
+  const scale = 1 + (petSizeLevel - 1) * 0.2;
+  PET_SIZE = Math.max(1, roundHalfUp(BASE_PET_SIZE * scale));
+  WINDOW_WIDTH = Math.max(1, roundHalfUp(BASE_WINDOW_WIDTH * scale));
+  WINDOW_HEIGHT = Math.max(1, roundHalfUp(BASE_WINDOW_HEIGHT * scale));
+}
+
+function localeFilePath() {
+  try {
+    return path.join(app.getPath('userData'), LOCALE_FILE);
+  } catch (_) {
+    return path.join(require('os').tmpdir(), LOCALE_FILE);
+  }
+}
+
+function sizeFilePath() {
+  try {
+    return path.join(app.getPath('userData'), SIZE_FILE);
+  } catch (_) {
+    return path.join(require('os').tmpdir(), SIZE_FILE);
+  }
+}
+
+function loadSavedLocale() {
+  try {
+    const p = localeFilePath();
+    if (!fs.existsSync(p)) return i18n.DEFAULT_LOCALE;
+    const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const code = String(raw.locale || '').toLowerCase();
+    return i18n.LOCALES.includes(code) ? code : i18n.DEFAULT_LOCALE;
+  } catch (_) {
+    return i18n.DEFAULT_LOCALE;
+  }
+}
+
+function saveLocale() {
+  try {
+    const p = localeFilePath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({ locale: petLocale }, null, 2), 'utf8');
+  } catch (err) {
+    logMain('saveLocale', err);
+  }
+}
+
+function loadSavedSizeLevel() {
+  try {
+    const p = sizeFilePath();
+    if (!fs.existsSync(p)) return 1;
+    const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const n = Math.max(1, Math.min(8, Math.floor(Number(raw.sizeLevel) || 1)));
+    return n;
+  } catch (_) {
+    return 1;
+  }
+}
+
+function saveSizeLevel() {
+  try {
+    const p = sizeFilePath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({ sizeLevel: petSizeLevel }, null, 2), 'utf8');
+  } catch (err) {
+    logMain('saveSizeLevel', err);
+  }
+}
+
+/**
+ * Manual Tray escape hatch only — last resort when soft pipe is stuck.
+ * Size / locale / show / hide use soft rebootstrap; do not auto-call this.
+ */
+function relaunchForTraySettings(reason) {
+  try {
+    logMain('relaunchForTraySettings', new Error(String(reason || 'settings')));
+  } catch (_) { /* ignore */ }
+  app.isQuitting = true;
+  clearSnoozeWait();
+  try {
+    awareness.stopPolling();
+  } catch (err) {
+    logMain('relaunch stopPolling', err);
+  }
+  try {
+    app.relaunch();
+  } catch (err) {
+    logMain('app.relaunch', err);
+  }
+  app.exit(0);
+}
+
+function notifyLocale() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('pet-locale', i18n.packForRenderer());
+}
+
+function setPetLocale(code) {
+  const next = i18n.LOCALES.includes(code) ? code : i18n.DEFAULT_LOCALE;
+  if (next === petLocale) return petLocale;
+  enqueueTrayOp({ kind: 'locale', value: next });
+  return petLocale;
+}
+
+function setPetLocaleNow(code) {
+  const next = i18n.LOCALES.includes(code) ? code : i18n.DEFAULT_LOCALE;
+  if (next === petLocale) {
+    i18n.loadLocale(next);
+    return true;
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  if (!beginShellOp('locale')) return false;
+
+  petLocale = next;
+  i18n.loadLocale(petLocale);
+  saveLocale();
+  try {
+    awareness.setLocale(petLocale);
+  } catch (err) {
+    logMain('setPetLocale awareness', err);
+  }
+  if (tray) updateTrayMenu();
+  notifyLocale();
+  return true;
+}
+
+function notifyPetSize() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('pet-size-level', petSizeLevel);
+}
+
+function setPetSizeLevel(level) {
+  const next = Math.max(1, Math.min(8, Math.floor(Number(level) || 1)));
+  if (next === petSizeLevel) return petSizeLevel;
+  enqueueTrayOp({ kind: 'size', value: next });
+  return petSizeLevel;
+}
+
+function setPetSizeLevelNow(level) {
+  const next = Math.max(1, Math.min(8, Math.floor(Number(level) || 1)));
+  if (next === petSizeLevel) return true;
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  if (!beginShellOp('size')) return false;
+
+  applySizeLevel(next);
+  saveSizeLevel();
+  if (tray) updateTrayMenu();
+  notifyPetSize();
+  return true;
+}
+
+applySizeLevel(1);
 
 function clearSnoozeWait() {
   if (snoozeTimer) {
@@ -78,6 +275,188 @@ function logMain(context, err) {
   console.error(`[${APP_NAME} v${APP_VERSION} Main] ${context}:`, err);
 }
 
+function clearShellBusyTimers() {
+  if (shellBusyTimer) {
+    clearTimeout(shellBusyTimer);
+    shellBusyTimer = null;
+  }
+  if (shellBusyMinTimer) {
+    clearTimeout(shellBusyMinTimer);
+    shellBusyMinTimer = null;
+  }
+}
+
+function notifyShellBusy(busy) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    mainWindow.webContents.send('pet-shell-busy', !!busy);
+  } catch (err) {
+    logMain('notifyShellBusy', err);
+  }
+}
+
+/** @returns {boolean} false = already loading, drop the click */
+function beginShellOp(reason) {
+  if (shellBusy) {
+    logMain('shellBusy drop', new Error(String(reason || 'op')));
+    return false;
+  }
+  shellBusy = true;
+  shellBusyStartedAt = Date.now();
+  const token = ++shellBusyToken;
+  clearShellBusyTimers();
+  shellBusyTimer = setTimeout(() => {
+    endShellOp(token, 'timeout');
+  }, SHELL_BUSY_MAX_MS);
+  notifyShellBusy(true);
+  if (tray) updateTrayMenu();
+  return true;
+}
+
+function endShellOp(token, _why) {
+  if (token != null && token !== shellBusyToken) return;
+  if (!shellBusy) return;
+
+  const finish = () => {
+    if (token != null && token !== shellBusyToken) return;
+    shellBusy = false;
+    clearShellBusyTimers();
+    notifyShellBusy(false);
+    if (tray) updateTrayMenu();
+    // Boot open→close: only then start awareness (no speak/poll fighting show pipe).
+    tryStartAwarenessAfterShell();
+  };
+
+  const elapsed = Date.now() - shellBusyStartedAt;
+  if (elapsed < SHELL_BUSY_MIN_MS) {
+    shellBusyMinTimer = setTimeout(finish, SHELL_BUSY_MIN_MS - elapsed);
+  } else {
+    finish();
+  }
+}
+
+function tryStartAwarenessAfterShell() {
+  if (awarenessStarted || !rendererLoaded || !bootShowStarted) return;
+  if (shellBusy) return;
+  awarenessStarted = true;
+  try {
+    awareness.afterWindowReady(awarenessBoot);
+  } catch (err) {
+    logMain('awareness.afterWindowReady', err);
+  }
+}
+
+function runShellOp(reason, fn) {
+  if (!beginShellOp(reason)) return false;
+  const token = shellBusyToken;
+  try {
+    fn();
+  } catch (err) {
+    logMain(`runShellOp ${reason}`, err);
+    endShellOp(token, 'error');
+    return false;
+  }
+  return true;
+}
+
+function clearTrayPrepareTimer() {
+  if (trayPrepareTimer) {
+    clearTimeout(trayPrepareTimer);
+    trayPrepareTimer = null;
+  }
+}
+
+/**
+ * Tray show/hide/size/locale — one idle gate (drop if busy).
+ * Soft pipe: pause → apply → resume → Show speech. Relaunch = manual Tray only.
+ */
+function enqueueTrayOp(op) {
+  if (!op || !op.kind) return;
+
+  if (shellBusy) {
+    if (tray) updateTrayMenu();
+    return;
+  }
+  if (trayPrepareWaiting) {
+    if (tray) updateTrayMenu();
+    return;
+  }
+
+  pendingTrayOp = op;
+  trayPrepareWaiting = true;
+  clearTrayPrepareTimer();
+  if (tray) updateTrayMenu();
+
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    const run = pendingTrayOp;
+    pendingTrayOp = null;
+    trayPrepareWaiting = false;
+    executeTrayOp(run);
+    if (tray) updateTrayMenu();
+    return;
+  }
+
+  try {
+    mainWindow.webContents.send('pet-tray-prepare');
+  } catch (err) {
+    logMain('pet-tray-prepare', err);
+    dropPendingTrayOp();
+    return;
+  }
+  // Dead renderer only — drop, never force-apply mid-stage.
+  trayPrepareTimer = setTimeout(() => {
+    trayPrepareTimer = null;
+    if (!trayPrepareWaiting) return;
+    dropPendingTrayOp();
+  }, 3000);
+}
+
+function dropPendingTrayOp() {
+  clearTrayPrepareTimer();
+  trayPrepareWaiting = false;
+  pendingTrayOp = null;
+  if (tray) updateTrayMenu();
+}
+
+function onTrayIdleReady() {
+  clearTrayPrepareTimer();
+  trayPrepareWaiting = false;
+  if (!pendingTrayOp) {
+    if (tray) updateTrayMenu();
+    return;
+  }
+  if (shellBusy) {
+    dropPendingTrayOp();
+    return;
+  }
+
+  const op = pendingTrayOp;
+  pendingTrayOp = null;
+  const ok = executeTrayOp(op);
+  if (!ok && tray) updateTrayMenu();
+}
+
+function onTrayIdleReject() {
+  dropPendingTrayOp();
+}
+
+/** @returns {boolean} */
+function executeTrayOp(op) {
+  if (!op || !op.kind) return true;
+  switch (op.kind) {
+    case 'show':
+      return showPetWindowNow();
+    case 'hide':
+      return hidePetWindowNow();
+    case 'size':
+      return setPetSizeLevelNow(op.value);
+    case 'locale':
+      return setPetLocaleNow(op.value);
+    default:
+      return true;
+  }
+}
+
 process.on('uncaughtException', (err) => logMain('uncaughtException', err));
 process.on('unhandledRejection', (err) => logMain('unhandledRejection', err));
 
@@ -90,14 +469,18 @@ function getWorkArea() {
   return screen.getPrimaryDisplay().workArea;
 }
 
-function applyAlwaysOnTop(win) {
+/**
+ * Boot-only always-on-top. Call once at first window create / ready-to-show.
+ * Do NOT call from show/hide/reassert/drag — toggling pulls other apps forward on Windows.
+ */
+function bootAlwaysOnTop(win) {
   if (!win || win.isDestroyed()) return;
-  if (petVisuallyHidden) return;
-  win.setAlwaysOnTop(false);
+  if (alwaysOnTopBooted) return;
   win.setAlwaysOnTop(true, ALWAYS_ON_TOP_LEVEL);
+  alwaysOnTopBooted = true;
 }
 
-/** Soft-hide visual: invisible + no hit testing + not on top. */
+/** Soft-hide visual: invisible + no hit testing. Keeps always-on-top (opacity + ignore-mouse only). */
 function applyHiddenVisual(win) {
   if (!win || win.isDestroyed()) return;
   clearMouseAcceptTimers();
@@ -105,12 +488,11 @@ function applyHiddenVisual(win) {
   win.setFocusable(false);
   win.setIgnoreMouseEvents(true);
   win.setOpacity(0);
-  win.setAlwaysOnTop(false);
 }
 
 /**
  * Force input-on visual (tray show / snooze wake / OS reassert).
- * Always hard-clears ignore-mouse (Windows often sticks after soft-hide).
+ * Opacity + hard-clear ignore-mouse only — does not touch alwaysOnTop.
  */
 function applyVisibleVisual(win) {
   if (!win || win.isDestroyed()) return;
@@ -118,13 +500,13 @@ function applyVisibleVisual(win) {
   win.setFocusable(false);
   win.setOpacity(1);
   forceAcceptMouseEvents(win);
-  applyAlwaysOnTop(win);
 }
 
 function restorePetWindowShell(win) {
   if (!win || win.isDestroyed()) return;
 
   win.setMenu(null);
+  // Keep empty — page-title-updated is blocked so OS cannot paint a caption strip.
   win.setTitle('');
   win.setSkipTaskbar(true);
   win.setFocusable(false);
@@ -137,11 +519,25 @@ function restorePetWindowShell(win) {
   if (typeof win.setVisibleOnAllWorkspaces === 'function') {
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   }
+  try {
+    if (win.isFocused()) win.blur();
+  } catch (_) { /* ignore */ }
+  // alwaysOnTop is boot-only — never re-applied here.
+}
 
-  if (!petVisuallyHidden) {
-    applyAlwaysOnTop(win);
-  } else {
-    win.setAlwaysOnTop(false);
+/**
+ * UX: thin OS title/caption bar on the pet window itself ("Preview" strip above bubble).
+ * Tray right-click can activate the window and Windows redraws that chrome — re-strip it.
+ */
+function hideWindowCaptionChrome(win = mainWindow) {
+  if (!win || win.isDestroyed()) return;
+  restorePetWindowShell(win);
+}
+
+function hideWindowCaptionChromeBurst() {
+  hideWindowCaptionChrome();
+  for (const ms of [0, 16, 50, 120, 250]) {
+    setTimeout(() => hideWindowCaptionChrome(), ms);
   }
 }
 
@@ -158,11 +554,24 @@ function reassertPetSurface(win = mainWindow) {
   }
 }
 
+function notifyMovementLock() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('pet-movement-lock', movementLocked);
+}
+
+function setMovementLocked(locked) {
+  movementLocked = !!locked;
+  notifyMovementLock();
+  if (tray) updateTrayMenu();
+}
+
 function notifyPetShown() {
   if (!mainWindow || mainWindow.isDestroyed() || petVisuallyHidden) return;
   mainWindow.webContents.send('pet-visibility', true);
   mainWindow.webContents.send('pet-force-input');
   mainWindow.webContents.send('screen-changed');
+  notifyMovementLock();
+  // Do NOT notifyPetSize here — same level would rebootstrap and cancel Show speech 1→2→3.
 }
 
 function restorePetWindowBounds(win) {
@@ -261,7 +670,7 @@ function movePetWindow(win, petX, petY, winW, winH, anchor = 'bottom') {
       height: bounds.height,
     });
   }
-  // Always-on-top is applied on show/restore/drag enter — not every move.
+  // alwaysOnTop is boot-only — never toggled on move/show/hide.
 }
 
 function getWindowPetPosition(win) {
@@ -287,29 +696,31 @@ function getWindowPetPosition(win) {
 }
 
 function enterDragMode(win) {
+  // Drag does not touch alwaysOnTop (boot-only).
   if (!win || win.isDestroyed()) return;
-
-  applyAlwaysOnTop(win);
-
-  if (dragMoveListener) {
-    win.removeListener('move', dragMoveListener);
-  }
-  dragMoveListener = () => applyAlwaysOnTop(win);
-  win.on('move', dragMoveListener);
 }
 
 function exitDragMode(win) {
   if (!win || win.isDestroyed()) return;
-
   if (dragMoveListener) {
     win.removeListener('move', dragMoveListener);
     dragMoveListener = null;
   }
-  applyAlwaysOnTop(win);
+  // Do not re-apply alwaysOnTop.
 }
 
 function hidePetWindow() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  enqueueTrayOp({ kind: 'hide' });
+}
+
+function showPetWindow() {
+  enqueueTrayOp({ kind: 'show' });
+}
+
+/** @returns {boolean} */
+function hidePetWindowNow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  if (!beginShellOp('hide')) return false;
 
   // Soft-hide: keep process + window alive; only hide visually and block hits.
   petVisuallyHidden = true;
@@ -321,10 +732,14 @@ function hidePetWindow() {
   applyHiddenVisual(mainWindow);
   // Stages pause after visual is off (same pipe as tray hide / snooze).
   mainWindow.webContents.send('pet-visibility', false);
+  return true;
 }
 
-function showPetWindow() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+/** @returns {boolean} */
+function showPetWindowNow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  if (!beginShellOp('show')) return false;
+  bootShowStarted = true;
 
   // 1) Input/visual ON first — hard clear ignore-mouse before anything else.
   petVisuallyHidden = false;
@@ -352,6 +767,7 @@ function showPetWindow() {
       mainWindow.webContents.send('pet-force-input');
     }
   }, 50);
+  return true;
 }
 
 function createWindow() {
@@ -366,6 +782,9 @@ function createWindow() {
     transparent: true,
     backgroundColor: '#00000000',
     frame: false,
+    thickFrame: false,
+    roundedCorners: false,
+    autoHideMenuBar: true,
     alwaysOnTop: true,
     hasShadow: false,
     resizable: false,
@@ -392,12 +811,26 @@ function createWindow() {
   mainWindow.loadFile('index.html');
   mainWindow.setMenu(null);
   mainWindow.setTitle('');
+  // Stop Chromium/OS from pushing productName into a visible caption bar.
+  mainWindow.on('page-title-updated', (event) => {
+    event.preventDefault();
+  });
   restorePetWindowShell(mainWindow);
+  // alwaysOnTop once at create — soft show/hide only change opacity + mouse ignore.
+  bootAlwaysOnTop(mainWindow);
+
+  mainWindow.webContents.once('did-finish-load', () => {
+    rendererLoaded = true;
+    // Do not start awareness while boot show shellBusy is open — wait endShellOp.
+    tryStartAwarenessAfterShell();
+  });
 
   mainWindow.once('ready-to-show', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
+      bootAlwaysOnTop(mainWindow);
       reassertPetSurface(mainWindow);
-      showPetWindow();
+      // Boot: run show pipe immediately (renderer just loaded — no pending settle).
+      showPetWindowNow();
     }
   });
 
@@ -458,7 +891,7 @@ function createWindow() {
 }
 
 function createTray() {
-  const iconPath = path.join(__dirname, 'PetPicture', 'right.png');
+  const iconPath = path.join(__dirname, 'build', 'icon.png');
   let icon = nativeImage.createFromPath(iconPath);
 
   if (icon.isEmpty()) {
@@ -470,6 +903,9 @@ function createTray() {
   }
 
   tray = new Tray(icon);
+  // Manual popup only — OS auto contextMenu stacks / re-opens on every right-click.
+  tray.setContextMenu(null);
+  tray.on('right-click', () => openTrayMenuOnce());
   updateTrayMenu();
 }
 
@@ -496,7 +932,7 @@ function launchUninstaller() {
     dialog.showMessageBox({
       type: 'warning',
       title: APP_NAME,
-      message: 'ไม่พบตัวถอนการติดตั้ง',
+      message: i18n.tray('uninstallMissing'),
       detail: installDir,
     }).catch((err) => logMain('launchUninstaller missing', err));
     return;
@@ -506,7 +942,7 @@ function launchUninstaller() {
   shell.openPath(uninstaller).then((errMsg) => {
     if (errMsg) {
       logMain('launchUninstaller openPath', errMsg);
-      dialog.showErrorBox(APP_NAME, `เปิดตัวถอนการติดตั้งไม่สำเร็จ:\n${errMsg}`);
+      dialog.showErrorBox(APP_NAME, i18n.tray('uninstallFail', { err: errMsg }));
       return;
     }
     app.isQuitting = true;
@@ -515,47 +951,149 @@ function launchUninstaller() {
   });
 }
 
-function updateTrayMenu() {
-  const startupEnabled = app.getLoginItemSettings().openAtLogin;
+/** Steam/Roblox-like: no popup while shell/prepare/Show speech — icon+tooltip stay. */
+function isTrayMenuAllowed() {
+  return !shellBusy && !trayPrepareWaiting && !showSpeechActive;
+}
 
-  const contextMenu = Menu.buildFromTemplate([
+function closeTrayMenuIfOpen() {
+  if (!tray) {
+    trayMenuOpen = false;
+    hideWindowCaptionChromeBurst();
+    return;
+  }
+  try {
+    tray.closeContextMenu();
+  } catch (err) {
+    logMain('closeContextMenu', err);
+  }
+  trayMenuOpen = false;
+  hideWindowCaptionChromeBurst();
+}
+
+function buildTrayContextMenu() {
+  const startupEnabled = app.getLoginItemSettings().openAtLogin;
+  const t = (key, vars) => i18n.tray(key, vars);
+
+  return Menu.buildFromTemplate([
     {
-      label: 'แสดง Pet',
+      label: t('show'),
       click: () => showPetWindow(),
     },
     {
-      label: 'ซ่อน Pet',
+      label: t('hide'),
       click: () => hidePetWindow(),
     },
     { type: 'separator' },
     {
-      label: 'เปิดพร้อมระบบ',
+      label: t('size'),
+      submenu: [1, 2, 3, 4, 5, 6, 7, 8].map((n) => ({
+        label: n === 1 ? t('sizeDefault', { n }) : t('sizeN', { n }),
+        type: 'radio',
+        checked: petSizeLevel === n,
+        click: () => setPetSizeLevel(n),
+      })),
+    },
+    {
+      label: t('language'),
+      submenu: [
+        {
+          label: t('langTh'),
+          type: 'radio',
+          checked: petLocale === 'th',
+          click: () => setPetLocale('th'),
+        },
+        {
+          label: t('langEn'),
+          type: 'radio',
+          checked: petLocale === 'en',
+          click: () => setPetLocale('en'),
+        },
+        {
+          label: t('langZh'),
+          type: 'radio',
+          checked: petLocale === 'zh',
+          click: () => setPetLocale('zh'),
+        },
+      ],
+    },
+    {
+      label: t('lock'),
+      type: 'checkbox',
+      checked: movementLocked,
+      click: (item) => {
+        setMovementLocked(item.checked);
+      },
+    },
+    {
+      label: t('startup'),
       type: 'checkbox',
       checked: startupEnabled,
       click: (item) => {
         app.setLoginItemSettings({
           openAtLogin: item.checked,
           path: process.execPath,
-          args: app.isPackaged ? [] : [path.resolve(process.argv[1])],
+          args: app.isPackaged ? [] : [path.resolve(process.argv[1] || '.')],
         });
       },
     },
     { type: 'separator' },
     {
-      label: 'ถอนการติดตั้ง',
+      label: t('relaunch'),
+      click: () => relaunchForTraySettings('tray-manual'),
+    },
+    {
+      label: t('uninstall'),
       click: () => launchUninstaller(),
     },
     {
-      label: 'ออก',
+      label: t('quit'),
       click: () => {
         app.isQuitting = true;
         app.quit();
       },
     },
   ]);
+}
 
+/** One open only: busy / already open → ignore right-click (no stacked panel). */
+function openTrayMenuOnce() {
+  if (!tray || trayMenuOpen || !isTrayMenuAllowed()) {
+    hideWindowCaptionChrome();
+    return;
+  }
+
+  hideWindowCaptionChrome();
+
+  const menu = buildTrayContextMenu();
+  trayMenuOpen = true;
+  menu.once('menu-will-close', () => {
+    trayMenuOpen = false;
+    // Tray close often activates pet window → OS paints thin title strip above bubble.
+    hideWindowCaptionChromeBurst();
+  });
+
+  try {
+    tray.popUpContextMenu(menu);
+  } catch (err) {
+    trayMenuOpen = false;
+    hideWindowCaptionChromeBurst();
+    logMain('popUpContextMenu', err);
+  }
+}
+
+function updateTrayMenu() {
+  if (!tray) return;
   tray.setToolTip(`${APP_NAME} v${APP_VERSION}`);
-  tray.setContextMenu(contextMenu);
+  // Never attach OS auto-menu — open only via openTrayMenuOnce (single-flight).
+  try {
+    tray.setContextMenu(null);
+  } catch (err) {
+    logMain('setContextMenu null', err);
+  }
+  if (!isTrayMenuAllowed()) {
+    closeTrayMenuIfOpen();
+  }
 }
 
 function setupIpc() {
@@ -661,10 +1199,80 @@ function setupIpc() {
     return app.getLoginItemSettings().openAtLogin;
   });
 
+  ipcMain.handle('get-movement-lock', () => movementLocked);
+
+  ipcMain.handle('set-movement-lock', (_event, enabled) => {
+    setMovementLocked(!!enabled);
+    return movementLocked;
+  });
+
+  ipcMain.handle('get-pet-size-level', () => petSizeLevel);
+
+  ipcMain.handle('set-pet-size-level', (_event, level) => setPetSizeLevel(level));
+
+  ipcMain.handle('get-locale', () => i18n.packForRenderer());
+
+  ipcMain.handle('set-locale', (_event, code) => {
+    setPetLocale(code);
+    return i18n.packForRenderer();
+  });
+
+  ipcMain.handle('shell-ready', () => {
+    endShellOp(shellBusyToken, 'renderer');
+    return true;
+  });
+
+  ipcMain.handle('tray-idle-ready', () => {
+    onTrayIdleReady();
+    return true;
+  });
+
+  ipcMain.handle('tray-idle-reject', () => {
+    onTrayIdleReject();
+    return true;
+  });
+
+  ipcMain.handle('show-speech-gate', (_event, active) => {
+    showSpeechActive = !!active;
+    if (tray) updateTrayMenu();
+    return true;
+  });
+
+  /** Tray pipe fresh start — clear sticky show gate + general awareness speak. */
+  ipcMain.handle('stage-hard-reset', () => {
+    showSpeechActive = false;
+    if (tray) updateTrayMenu();
+    try {
+      awareness.resetGeneralSpeakLock();
+    } catch (err) {
+      logMain('stage-hard-reset awareness', err);
+    }
+    return true;
+  });
+
   ipcMain.handle('quit-app', () => {
     app.isQuitting = true;
     clearSnoozeWait();
+    try {
+      awareness.stopPolling();
+    } catch (err) {
+      logMain('quit-app stopPolling', err);
+    }
     app.quit();
+  });
+
+  // Renderer finished an awareness line (optional ack before thenQuit).
+  ipcMain.handle('awareness-speech-done', (_event, thenQuit) => {
+    try {
+      awareness.notifySpeechFinished(!!thenQuit);
+    } catch (err) {
+      logMain('awareness-speech-done', err);
+      if (thenQuit) {
+        app.isQuitting = true;
+        clearSnoozeWait();
+        app.quit();
+      }
+    }
   });
 
   ipcMain.handle('snooze', async (event, ms) => {
@@ -675,13 +1283,14 @@ function setupIpc() {
       const delay = Math.max(0, Number(ms) || 0);
 
       // Wait until shown again (timer or tray "แสดง Pet").
+      // Use Now variants — snooze already settled stages; do not re-enter prepare slot.
       await new Promise((resolve) => {
         clearSnoozeWait();
         snoozeResolve = resolve;
-        hidePetWindow();
+        hidePetWindowNow();
         snoozeTimer = setTimeout(() => {
           snoozeTimer = null;
-          showPetWindow();
+          showPetWindowNow();
         }, delay);
       });
     } catch (err) {
@@ -693,8 +1302,46 @@ function setupIpc() {
 if (gotLock) {
   app.on('second-instance', () => showPetWindow());
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     setupIpc();
+
+    petLocale = loadSavedLocale();
+    i18n.loadLocale(petLocale);
+    applySizeLevel(loadSavedSizeLevel());
+
+    awareness.init({
+      app,
+      getMainWindow: () => mainWindow,
+      forceQuit: () => {
+        app.isQuitting = true;
+        clearSnoozeWait();
+        try {
+          awareness.stopPolling();
+        } catch (err) {
+          logMain('awareness forceQuit stopPolling', err);
+        }
+        app.quit();
+      },
+      isShowSpeechActive: () => showSpeechActive,
+    });
+    try {
+      awareness.setLocale(petLocale);
+    } catch (err) {
+      logMain('awareness.setLocale', err);
+    }
+
+    try {
+      awarenessBoot = await awareness.evaluateBoot();
+    } catch (err) {
+      logMain('awareness.evaluateBoot', err);
+      awarenessBoot = { action: 'run' };
+    }
+
+    // Legacy silent-quit → still create window and speak leave (never invisible quit).
+    if (awarenessBoot.action === 'silent-quit') {
+      awarenessBoot = { action: 'speak-quit', text: 'ฉันไม่อยู่ล่ะ' };
+    }
+
     createWindow();
     createTray();
 
@@ -705,8 +1352,10 @@ if (gotLock) {
     });
 
     if (app.isPackaged) {
+      // Respect user tray checkbox — do not force openAtLogin on every launch.
+      const { openAtLogin } = app.getLoginItemSettings();
       app.setLoginItemSettings({
-        openAtLogin: true,
+        openAtLogin,
         path: process.execPath,
       });
     }
@@ -728,5 +1377,10 @@ if (gotLock) {
     app.isQuitting = true;
     clearMouseAcceptTimers();
     clearSnoozeWait();
+    try {
+      awareness.stopPolling();
+    } catch (err) {
+      logMain('before-quit stopPolling', err);
+    }
   });
 }

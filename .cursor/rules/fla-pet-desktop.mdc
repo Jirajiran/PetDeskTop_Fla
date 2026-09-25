@@ -1,0 +1,84 @@
+---
+description: Fla pet desktop — shellBusy, pipelines, i18n, awareness invariants
+alwaysApply: true
+---
+
+# Fla_petDesktop — คติประจำใจ
+
+Desktop pet (Electron). แก้บัคหรือเพิ่มฟีเจอร์ต้องอยู่ภายใต้กรอบนี้ ห้าม invent ท่อคู่ขนานที่ข้าม loading / gen / i18n.
+
+**ส่งต่องาน (คนหรือ agent):** อ่าน `HANDOFF.md` ที่รากโปรเจกต์ก่อน — มีสถานะงานรอบนี้  
+ไฟล์นี้ = กฎถาวร; HANDOFF = บริบทว่ากำลังคิด/ค้างอะไร
+
+## 1. Shell loading สำคัญสุด
+
+คำสั่งจาก **Windows system tray และทุกทางที่เทียบเท่า** (แสดง / ซ่อน / Size / ภาษา / snooze wake / second-instance / IPC เดียวกัน):
+
+- **ขนาด / ภาษา / แสดง / ซ่อน** = ท่อ soft เดียวกันผ่าน `enqueueTrayOp` (persist userData + notify → rebootstrap ใน pet)
+- **รีสตาร์ทแอป** = ปุ่ม Tray `relaunch` เท่านั้น (last resort) — ห้าม auto-relaunch จาก Size/locale
+- ระหว่างไม่ว่าง (`shellBusy` / `trayPrepareWaiting` / Show speech): **ไม่เปิดเมนูถาด**; ไอคอน+tooltip ยังอยู่
+- เมนูถาด = **เปิดได้ครั้งเดียว** (`trayMenuOpen` + `popUpContextMenu`); คลิกขวาซ้ำตอนเปิดอยู่แล้วไม่ซ้อนแผง; ไม่ใช้ OS `setContextMenu` อัตโนมัติ
+- ลำดับ awareness: **โป๊ (สูงสุด)** → **Show แนะนำตัว** → other; Show gate กัน YouTube/โหลด
+- Tray แสดง/ซ่อน: กดกลาง other/Show = ทิ้งคลิก; เข้าท่อ = hard reset stage
+- ระหว่าง `shellBusy`: บล็อก / ทิ้ง show-hide/size/locale
+- Boot: awareness หลัง show shell ปิดครั้งแรก
+- ห้าม invent `shellBusyOwner`/awareness reclaim ที่ตัด `shell-ready` ตอน boot
+- ขั้นต่ำ ~700ms / สูงสุดมี timeout — อย่าปลด busy ก่อนท่อ settle
+- เข้าท่อ show/hide/size/locale ด้วย `beginShellOp` → settle ภาพ → `shell-ready` → `endShellOp`
+
+## 2. ท่อเดียวกัน (pipeline / OOP stage)
+
+ซ่อน↔แสดง, เปลี่ยน Size, เปลี่ยนภาษา = **ท่อเดียว**:
+
+`pause → apply → resume → Show speech (เรียงหมวด)`
+
+- Soft-hide: ไม่ `BrowserWindow.hide` — opacity + ignore-mouse; หน้าต่างยังมีชีวิต
+- **Always-on-top = boot-only** — ห้ามสลับตอน show/hide/drag (ดึงแอปอื่นบน Windows)
+- Size / locale เท่าเดิม: no-op — ห้าม bump `visibilityGen` / rebootstrap ฟรี
+- Show จาก tray: ห้ามยิง `notifyPetSize` ซ้ำจนฆ่าท่อพูด
+
+`visibilityGen` คือรุ่นท่อ — ท่อใหม่ฆ่าของเก่า; early-return ต้อง `shell-ready` ด้วยถ้าเคย `beginShellOp`
+
+## 3. i18n = JSON logline
+
+- ไฟล์: `source/i18n/{th,en,zh}.json` + `i18n.js`
+- `categories` เรียงลำดับ — ระบบ**ไม่รู้**ว่าอะไรคือทักทาย/คุย; รู้แค่ว่าเรียงกัน
+- **Show** = ทุกหมวดยกเว้นตัวสุดท้าย
+- **Awareness** = ทั้งแถว; **หมวดสุดท้าย = ลา + thenQuit** เสมอ
+- ขยายรอบ = แก้ JSON ไม่ hardcode จำนวนรอบใน logic
+- เปลี่ยนภาษา = soft rebootstrap แบบ Size + จำ locale ใน userData (ไม่ auto-relaunch)
+
+## 4. Awareness (รองจาก shell busy)
+
+- สำคัญสูงเมื่อเข้า stage: บังคับพูดครบคิว แม้ซ่อน / เดิน / ลาก
+- พูดแบบ `force` — ห้าม `startSpeaking` ธรรมดาที่ติด `isDragFrozen` แล้ว skip รอบ
+- โป๊/แบน: session แรกไล่คิวหมวดแล้ว quit; `reopenCount` +1 ต่อเปิดแอปหลังแบน ไม่ใช่ต่อปิดแท็บระหว่างพูด
+- ≥4: พูดคลังลาแล้วปิด — ห้ามเงียบปิดโดยไม่พูด (ทดสอบต้องเห็น)
+- อย่ารวม awareness เข้า `shellBusy` แบบ owner/reclaim จนกว่าจะออกแบบไม่ชนท่อ show ตอน boot
+
+## 5. Pet input / motion
+
+- ลาก = ค้าง `fade1`; กดค้างตามเมาส์แม้ติดขอบ (clamp ตำแหน่ง ไม่หยุด loop)
+- คลิก/ลากตอนเดิน = เคลียร์ `walkTarget` → idle → บ่นตอนปล่อย
+- Flee ตัดสินใจเมาส์: `MOUSE_FLEE_CHECK_MS` ตามค่าในโค้ด (ปัจจุบัน 100)
+- วาร์ป/เดิน: `MoveMent.wav` ตามที่ผูกไว้
+- **Lock** = อยู่กับที่ (ปิด AI pathing); ลากได้ — snooze ใช้ multi-tap เดียวกับ unlock (ห้ามคลิกเดียวแล้วซ่อน)
+
+## 6. ไฟล์หลัก
+
+| โซน | ไฟล์ |
+|-----|------|
+| Tray / shell / window | `source/main.js` |
+| Pet AI / drag / show speak | `source/pet.js` |
+| App awareness | `source/awareness.js` |
+| Locale | `source/i18n.js`, `source/i18n/*.json` |
+| Preload IPC | `source/preload.js` |
+
+รันทดสอบจาก `source/` ด้วย `npm start`. อย่า commit Setup `.exe` โดยไม่ถาม.
+
+## ตรวจก่อน ship
+
+- คำสั่ง tray รัวแล้วยังไม่ซ้อนท่อ / ไม่ค้าง busy ตลอดกาล
+- ซ่อน→แสดง และ Size/ภาษา ได้ Show ตามหมวด i18n
+- Awareness ยังพูดครบคิวแล้ว quit ตามสเปก
+- ไม่แตะ alwaysOnTop นอก boot

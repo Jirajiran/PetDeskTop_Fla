@@ -1,32 +1,69 @@
-// Fla_petDesktop_V32 — unlockPetInput: CSS hover can work while click flags stay locked
-// Soft-hide opacity pipe; middle-click quit; 7 taps snooze; show/snooze-wake force unlock.
-const APP_NAME = 'Fla_petDesktop_V32';
-const APP_VERSION = '32.0.0';
+// Fla_petDesktop_V34 — single SVG poses (Move/Speak/Look) + eye look-at-mouse tween.
+const APP_NAME = 'Fla_petDesktop_V34';
+const APP_VERSION = '34.0.0';
 
-const SPRITES = {
-  idle: 'PetPicture/Idel.png',
-  n: 'PetPicture/up.png',
-  s: 'PetPicture/down.png',
-  w: 'PetPicture/left.png',
-  e: 'PetPicture/right.png',
-  nw: 'PetPicture/up-left.png',
-  ne: 'PetPicture/up-right.png',
-  sw: 'PetPicture/down-left.png',
-  se: 'PetPicture/down-right.png',
+/** Crop half-size from Fla_Base_Safe_area (180×180 transparent frame). */
+const POSE_HALF = 90;
+const POSES = {
+  idle: { id: 'Idle', x: 247.65, y: 312.75 },
+  n: { id: 'Move_N', x: 248.5, y: 159.1 },
+  s: { id: 'Move_S', x: 245, y: 462.25 },
+  w: { id: 'Move_W', x: 101.05, y: 312.75 },
+  e: { id: 'Move_E', x: 395.35, y: 312.75 },
+  nw: { id: 'Move_WN', x: 101.25, y: 159.1 },
+  ne: { id: 'Move_EN', x: 393.85, y: 159.1 },
+  sw: { id: 'Move_WS', x: 101.4, y: 462.25 },
+  se: { id: 'Move_ES', x: 383.45, y: 462.25 },
+  speak1: { id: 'Speak_1', x: 108.35, y: 671.6 },
+  speak2: { id: 'Speak_2', x: 245.7, y: 671.6 },
+  speak3: { id: 'Speak_3', x: 390.1, y: 671.6 },
+  fade1: { id: 'Fade_1', x: 241.2, y: 848.85 },
+  fade2: { id: 'Fade_2', x: 395.85, y: 848.85 },
+  sleep: { id: 'Fade_Sleep', x: 92.05, y: 848.85 },
+  lookN: { id: 'Look_N', x: 769.1, y: 159.1 },
+  lookS: { id: 'Look_S', x: 769.1, y: 467.75 },
+  lookE: { id: 'Look_E', x: 922.8, y: 317.75 },
+  lookW: { id: 'Look_W', x: 601.3, y: 317.75 },
+  lookNE: { id: 'Look_EN', x: 922.8, y: 159.1 },
+  lookNW: { id: 'Look_WN', x: 601.3, y: 159.1 },
+  lookSE: { id: 'Look_ES', x: 922.8, y: 467.75 },
+  lookSW: { id: 'Look_WS', x: 601.3, y: 467.75 },
+  /** Mouse over pet center — eye rest / middle look (from SVG Look_Middle). */
+  lookMiddle: { id: 'Look_Middle', x: 769.1, y: 317.75 },
 };
 
-const FADE_FRAMES = ['PetPicture/Fade01.png', 'PetPicture/Fade02.png'];
-const SPEAK_FRAMES = [
-  'PetPicture/Speak01.png',
-  'PetPicture/Speak02.png',
-  'PetPicture/Speak03.png',
-];
+const FADE_FRAMES = ['fade1', 'fade2'];
+const SPEAK_FRAMES = ['speak1', 'speak2', 'speak3'];
+
+/**
+ * Eye endpoints from SVG.
+ * Center (Look_Middle) = mouse on pet middle; 8 dirs = Look_*.
+ */
+const EYE_IDLE = {
+  L: { x: -11.9, y: 9.9 },
+  R: { x: 11.75, y: 9.25 },
+};
+const EYE_LOOK = {
+  n: { L: { x: -20.15, y: 4.85 }, R: { x: 19.65, y: 4.85 } },
+  s: { L: { x: -20.15, y: 18.35 }, R: { x: 19.65, y: 18.35 } },
+  e: { L: { x: -12.35, y: 10.55 }, R: { x: 34.85, y: 10.55 } },
+  w: { L: { x: -34.25, y: 10.55 }, R: { x: 10.95, y: 10.55 } },
+  ne: { L: { x: -12.35, y: 4.25 }, R: { x: 34.85, y: 4.25 } },
+  nw: { L: { x: -34.25, y: 3.3 }, R: { x: 10.95, y: 3.3 } },
+  se: { L: { x: -12.35, y: 14.8 }, R: { x: 34.85, y: 14.8 } },
+  sw: { L: { x: -34.25, y: 14.8 }, R: { x: 10.95, y: 14.8 } },
+};
 
 const FADE_FRAME_MS = 100;
 const SPEAK_FRAME_MS = 120;
+const LOOK_TICK_MS = 33;
+const LOOK_LERP = 0.22;
+const LOOK_DEADZONE_PX = 28; // baseline; runtime uses lookDeadzonePx
+const BASE_LOOK_DEADZONE_PX = 28;
+const SVG_PET_URL = 'PetPicture/PetDesignSVG.svg';
 const MIN_RHYTHM_BEATS = 8;
 const TRIGGER_DEPTH_PX = 16;
-const DEADZONE_PX = 12;
+const DEADZONE_PX = 12; // overwritten by applyPetSizeLevel; keep for any static refs
 const GRID_EDGE_FRAC = 0.15;
 const WARP_COOLDOWN_MS = 1000;
 const DRAG_COMPLAINT_MS = 2800;
@@ -40,30 +77,226 @@ const ENDING_DRAG_STUCK_MS = 12000;
 const SPEAK_STUCK_MS = 20000;
 const MOUSE_SLEEP_MS = 180000;
 const MOUSE_POLL_MS = 500;
-const MOUSE_NEAR_PX = 120;
-const MOUSE_RETARGET_COOLDOWN_MS = 2500;
-const WIN_PET = 72;
-const WIN_W = 88;
-const WIN_SPEAK_H = 120;
+/** Size 1 baseline near-radius (after ×2 flee tweak). */
+const BASE_MOUSE_NEAR_PX = 240;
+const BASE_DEADZONE_PX = 12;
+const BASE_SNOOZE_TAPS = 25;
+/** Flee side checks at most this often — not every MOVE_TICK_MS (pet walk alone must not retarget). */
+const MOUSE_FLEE_CHECK_MS = 100;
+/** Mouse must move at least this much before a cardinal-side change can retarget. */
+const MOUSE_FLEE_MOVE_PX = 6;
+const WARP_HOPS = 5;
+const FEATURE_READY_MS = 450;
+/** Size 1 baseline window (pre-200 experiment). */
+const BASE_WIN_PET = 72;
+const BASE_WIN_W = 88;
+const BASE_WIN_SPEAK_H = 120;
+/** Constant px/frame toward mouse while dragging / settling after release (×2). */
+const DRAG_SPEED_PX = 12;
 
-const DRAG_RELEASE_PHRASES = [
-  'ฉันไม่ชอบโดนลาก',
-  'มันเจ็บน่ะ',
-  'ช่วยอ่อนโยนหน่อย',
-];
+/** Runtime locale pack from main (i18n JSON). Categories are ordered logline beats. */
+let localePack = {
+  locale: 'th',
+  showCategories: [],
+  pools: { idle: [], drag: [] },
+};
+/** Main tray/IPC loading lock mirror — clear clicks while shell settles. */
+let shellBusyActive = false;
+/** Soft-show intro running — Tray rejects; general awareness blocked in main. */
+let showSpeechActiveLocal = false;
+/** Invalidates in-flight Show finally so it cannot clear a newer gate / leave gate stuck. */
+let showSpeechGateGen = 0;
 
-const THAI_PHRASES = [
-  'สวัสดี!',
-  'วันนี้อากาศดีนะ',
-  'อย่าลืมพักผ่อนบ้างนะ',
-  'ทำงานหนักจังเลย~',
-  'มีอะไรให้ช่วยไหม?',
-  'สู้ๆ นะ!',
-  'หิวข้าวยัง?',
-  'ยิ้มหน่อยสิ~',
-  'วันนี้เป็นยังไงบ้าง?',
-  'พักสายตาบ้างนะ',
-];
+function applyLocalePack(pack) {
+  if (!pack || typeof pack !== 'object') return;
+  localePack = {
+    locale: pack.locale || 'th',
+    showCategories: Array.isArray(pack.showCategories) ? pack.showCategories : [],
+    pools: {
+      idle: Array.isArray(pack.pools?.idle) ? pack.pools.idle : [],
+      drag: Array.isArray(pack.pools?.drag) ? pack.pools.drag : [],
+    },
+  };
+}
+
+function pickFromPoolList(list) {
+  if (!list || !list.length) return null;
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+function notifyShellReady(reason) {
+  try {
+    if (window.petAPI?.shellReady) {
+      window.petAPI.shellReady(reason || '');
+    }
+  } catch (err) {
+    logError('notifyShellReady', err);
+  }
+}
+
+async function clearClicksForShellBusy() {
+  walkTarget = null;
+  skipNextIdle = false;
+  if (isPointerSession || isDragFrozen || isActivelyDragging || isEndingDrag) {
+    try {
+      await cancelPointerSessionQuiet();
+    } catch (err) {
+      logError('clearClicksForShellBusy', err);
+    }
+  }
+  resetDragState();
+  releaseActivePointer();
+  isDragFrozen = false;
+  isActivelyDragging = false;
+  isEndingDrag = false;
+}
+
+/**
+ * Stage Snooze path → idle (no hide). Mouse snooze only — cuts other stages.
+ */
+async function enterSnoozeSettlePath() {
+  snoozeTapCount = 0;
+  lastSnoozeTapAt = 0;
+
+  walkTarget = null;
+  skipNextIdle = false;
+  lastDirection = null;
+  mouseFleeDidFlee = false;
+  mouseFleePendingSide = null;
+
+  if (isPointerSession || isDragFrozen || isActivelyDragging || isEndingDrag) {
+    try {
+      await cancelPointerSessionQuiet();
+    } catch (err) {
+      logError('enterSnoozeSettlePath cancelPointer', err);
+    }
+  }
+
+  cancelSpeaking();
+  stopVoice();
+  hideBubble();
+  isTransitioning = false;
+  speakStartedAt = 0;
+  forceIdleSprite();
+  resetSnoozeTaps();
+}
+
+/** True when Stage other is clear — Tray may open its pipe. */
+function isPetTrulyIdle() {
+  if (showSpeechActiveLocal) return false;
+  if (!isPetVisible || isSnoozed) return true;
+  if (shellBusyActive) return false;
+  if (awarenessPriorityActive || awarenessSpeakLock) return false;
+  if (isSpeaking || isTransitioning) return false;
+  if (isPointerSession || isDragFrozen || isActivelyDragging || isEndingDrag) return false;
+  if (walkTarget) return false;
+  if (currentSprite !== 'idle' && currentSprite !== 'sleep') return false;
+  return true;
+}
+
+/**
+ * Tray prepare: if idle → allow pipe; else REJECT (return / ignore click).
+ * No wait queue — full prevent while Stage other / Show intro is active.
+ */
+async function settleForTrayPrepare() {
+  try {
+    if (isPetTrulyIdle()) {
+      if (window.petAPI?.trayIdleReady) {
+        await window.petAPI.trayIdleReady();
+      }
+      return;
+    }
+    if (window.petAPI?.trayIdleReject) {
+      await window.petAPI.trayIdleReject();
+    }
+  } catch (err) {
+    logError('settleForTrayPrepare', err);
+    try {
+      if (window.petAPI?.trayIdleReject) {
+        await window.petAPI.trayIdleReject();
+      }
+    } catch (err2) {
+      logError('trayIdleReject', err2);
+    }
+  }
+}
+
+async function setShowSpeechGate(active) {
+  if (active) {
+    const myGen = ++showSpeechGateGen;
+    showSpeechActiveLocal = true;
+    try {
+      if (window.petAPI?.setShowSpeechGate) {
+        await window.petAPI.setShowSpeechGate(true);
+      }
+    } catch (err) {
+      logError('setShowSpeechGate on', err);
+    }
+    return myGen;
+  }
+
+  showSpeechActiveLocal = false;
+  try {
+    if (window.petAPI?.setShowSpeechGate) {
+      await window.petAPI.setShowSpeechGate(false);
+    }
+  } catch (err) {
+    logError('setShowSpeechGate off', err);
+  }
+  return showSpeechGateGen;
+}
+
+/**
+ * Tray pipe = fresh start. Clear sticky stage flags before pause/rebootstrap.
+ * Does not touch porn mid-flight in main if pornSequenceActive (awareness.resetGeneral).
+ */
+async function hardResetStagesForTrayPipe() {
+  showSpeechGateGen += 1;
+  showSpeechActiveLocal = false;
+
+  try {
+    if (window.petAPI?.stageHardReset) {
+      await window.petAPI.stageHardReset();
+    } else if (window.petAPI?.setShowSpeechGate) {
+      await window.petAPI.setShowSpeechGate(false);
+    }
+  } catch (err) {
+    logError('hardResetStagesForTrayPipe', err);
+  }
+
+  dragReleaseGen += 1;
+  speechGeneration += 1;
+  isSpeaking = false;
+  isTransitioning = false;
+  speakStartedAt = 0;
+  isMouseSleeping = false;
+  walkTarget = null;
+  lastDirection = null;
+  mouseFleeDidFlee = false;
+  mouseFleePendingSide = null;
+  skipNextIdle = false;
+  awarenessSpeakLock = false;
+  awarenessPriorityActive = false;
+
+  try {
+    stopVoice();
+    hideBubble();
+  } catch (_) { /* ignore */ }
+  bumpFadeGeneration();
+
+  if (isPointerSession || isDragFrozen || isActivelyDragging || isEndingDrag) {
+    try {
+      await cancelPointerSessionQuiet();
+    } catch (err) {
+      logError('hardResetStagesForTrayPipe cancelPointer', err);
+    }
+  }
+  resetDragState();
+  releaseActivePointer();
+  isDragFrozen = false;
+  isActivelyDragging = false;
+  isEndingDrag = false;
+}
 
 const petContainer = document.getElementById('pet-container');
 const pet = document.getElementById('pet');
@@ -71,9 +304,38 @@ const bubble = document.getElementById('speech-bubble');
 const speechText = document.getElementById('speech-text');
 const noteS = document.getElementById('note-s');
 const noteL = document.getElementById('note-l');
+const sfxClick = document.getElementById('sfx-click');
+const sfxMove = document.getElementById('sfx-move');
+const sfxShow = document.getElementById('sfx-show');
+const sfxHide = document.getElementById('sfx-hide');
 
 noteS.volume = 0.6;
 noteL.volume = 0.6;
+if (sfxClick) sfxClick.volume = 0.7;
+if (sfxMove) sfxMove.volume = 0.55;
+if (sfxShow) sfxShow.volume = 0.7;
+if (sfxHide) sfxHide.volume = 0.7;
+
+let petSvg = null;
+let petSvgReady = false;
+let idleEyeL = null;
+let idleEyeR = null;
+let eyeCurL = { x: EYE_IDLE.L.x, y: EYE_IDLE.L.y };
+let eyeCurR = { x: EYE_IDLE.R.x, y: EYE_IDLE.R.y };
+let eyeTargetL = { x: EYE_IDLE.L.x, y: EYE_IDLE.L.y };
+let eyeTargetR = { x: EYE_IDLE.R.x, y: EYE_IDLE.R.y };
+let lookEnabled = false;
+let featuresReadyAt = 0;
+let isMovementLocked = false;
+let petSizeLevel = 1;
+let WIN_PET = BASE_WIN_PET;
+let WIN_W = BASE_WIN_W;
+let WIN_SPEAK_H = BASE_WIN_SPEAK_H;
+let MOUSE_NEAR_PX = BASE_MOUSE_NEAR_PX;
+let activeDeadzonePx = BASE_DEADZONE_PX;
+let snoozeTapsNeeded = BASE_SNOOZE_TAPS;
+let snoozeTapMovePx = 10;
+let lookDeadzonePx = BASE_LOOK_DEADZONE_PX;
 
 let isSpeaking = false;
 let speechGeneration = 0;
@@ -99,6 +361,11 @@ let lastSync = { x: -1, y: -1, w: -1, h: -1 };
 let dragReleaseGen = 0;
 let syncGeneration = 0;
 let dragGrab = null;
+let dragTargetX = 0;
+let dragTargetY = 0;
+let dragFollowRaf = null;
+let lastDragWork = null;
+let isDragSettling = false;
 let dragSyncRaf = null;
 let fadeGen = 0;
 let pointerDownWork = null;
@@ -112,14 +379,74 @@ let visibilityGen = 0;
 let isMouseSleeping = false;
 let lastMouseActiveAt = Date.now();
 let lastCursorWork = null;
-let mouseRetargetUntil = 0;
+let mouseFleeSide = null;
+/** True while cursor is inside near-radius; cleared on leave so next enter can flee once. */
+let mouseFleeNearActive = false;
+/** Already fled once for the current near-session (enter → one destination). */
+let mouseFleeDidFlee = false;
+let mouseFleeLastCheckAt = 0;
+let mouseFleeLastMousePos = null;
+/** Cardinal side awaiting MOUSE_FLEE_CHECK_MS confirm after mouse moved to a new direction. */
+let mouseFleePendingSide = null;
+let mouseFleePendingAt = 0;
 let skipNextIdle = false;
+/** Soft-show count for process lifetime (greeting → introduce → narrative → silent). */
 let snoozeTapCount = 0;
 let lastSnoozeTapAt = 0;
 
-const SNOOZE_TAPS_NEEDED = 7;
+const SNOOZE_TAPS_NEEDED = 25; // baseline; runtime uses snoozeTapsNeeded
 const SNOOZE_TAP_GAP_MS = 2000;
 const SNOOZE_TAP_MOVE_PX = 10;
+
+function roundHalfUp(x) {
+  return Math.floor(Number(x) + 0.5);
+}
+
+function sizeScale(level = petSizeLevel) {
+  const n = Math.max(1, Math.min(8, Math.floor(Number(level) || 1)));
+  return 1 + (n - 1) * 0.2;
+}
+
+function applyPetSizeLevel(level) {
+  const prevPet = WIN_PET;
+  const centerX = petX + prevPet * 0.5;
+  const centerY = petY + prevPet * 0.5;
+
+  petSizeLevel = Math.max(1, Math.min(8, Math.floor(Number(level) || 1)));
+  const scale = sizeScale(petSizeLevel);
+  WIN_PET = Math.max(1, roundHalfUp(BASE_WIN_PET * scale));
+  WIN_W = Math.max(1, roundHalfUp(BASE_WIN_W * scale));
+  WIN_SPEAK_H = Math.max(1, roundHalfUp(BASE_WIN_SPEAK_H * scale));
+  MOUSE_NEAR_PX = Math.max(1, roundHalfUp(BASE_MOUSE_NEAR_PX * scale));
+  activeDeadzonePx = Math.max(1, roundHalfUp(BASE_DEADZONE_PX * scale));
+  lookDeadzonePx = Math.max(1, roundHalfUp(BASE_LOOK_DEADZONE_PX * scale));
+  // Size N: 25 + 25*0.2*(N-1) = 25*scale — snooze multi-tap (locked or unlocked).
+  snoozeTapsNeeded = Math.max(1, roundHalfUp(BASE_SNOOZE_TAPS * scale));
+  snoozeTapMovePx = Math.max(10, roundHalfUp(10 * scale));
+
+  // Icon + bubble + collider scale together (same CSS box = hit area).
+  document.documentElement.style.setProperty('--pet-safe', `${WIN_PET}px`);
+  document.documentElement.style.setProperty('--pet-draw', `${WIN_PET}px`);
+  document.documentElement.style.setProperty(
+    '--bubble-width',
+    `${Math.max(84, roundHalfUp(84 * scale))}px`,
+  );
+  document.documentElement.style.setProperty(
+    '--bubble-font',
+    `${Math.max(11, roundHalfUp(11 * scale))}px`,
+  );
+
+  // Keep visual center fixed — do not expand from the corner.
+  petX = centerX - WIN_PET * 0.5;
+  petY = centerY - WIN_PET * 0.5;
+
+  if (screenCache) {
+    screenCache.petSize = WIN_PET;
+    buildGrid(screenCache);
+    const clamped = clampPetPosition(petX, petY);
+    setPetPosition(clamped.x, clamped.y, true);
+  }
+}
 
 function logError(context, err) {
   console.error(`[${APP_NAME} v${APP_VERSION}] ${context}:`, err);
@@ -131,6 +458,194 @@ function sleep(ms) {
 
 function randBetween(min, max) {
   return min + Math.random() * (max - min);
+}
+
+function playSfx(el) {
+  if (!el) return;
+  try {
+    el.pause();
+    el.currentTime = 0;
+    el.play().catch(() => {});
+  } catch (err) {
+    logError('playSfx', err);
+  }
+}
+
+/** After show/resume: idle base only — Look / AI toys wait until settle. */
+function beginFeatureGate() {
+  featuresReadyAt = Date.now() + FEATURE_READY_MS;
+  lookEnabled = false;
+  resetIdleEyes(true);
+}
+
+function areFeaturesReady() {
+  return Date.now() >= featuresReadyAt;
+}
+
+function applyMovementLock(locked) {
+  // Lock = stay put (AI pathing off); drag still OK. Snooze taps use same multi-tap as unlock.
+  isMovementLocked = !!locked;
+  snoozeTapCount = 0;
+  lastSnoozeTapAt = 0;
+  if (isMovementLocked) {
+    walkTarget = null;
+    lastDirection = null;
+    if (!isSpeaking && !isTransitioning && currentSprite !== 'fade') {
+      setSpriteDirect('idle', true);
+    }
+  }
+}
+
+function poseViewBox(pose) {
+  return `${pose.x - POSE_HALF} ${pose.y - POSE_HALF} ${POSE_HALF * 2} ${POSE_HALF * 2}`;
+}
+
+function setEyeTransform(el, pos) {
+  if (!el) return;
+  el.setAttribute('transform', `matrix(1,0,0,1,${pos.x},${pos.y})`);
+}
+
+function resetIdleEyes(snap = true) {
+  eyeTargetL = { x: EYE_IDLE.L.x, y: EYE_IDLE.L.y };
+  eyeTargetR = { x: EYE_IDLE.R.x, y: EYE_IDLE.R.y };
+  if (snap) {
+    eyeCurL = { x: EYE_IDLE.L.x, y: EYE_IDLE.L.y };
+    eyeCurR = { x: EYE_IDLE.R.x, y: EYE_IDLE.R.y };
+    setEyeTransform(idleEyeL, eyeCurL);
+    setEyeTransform(idleEyeR, eyeCurR);
+  }
+}
+
+function showPose(key, options = {}) {
+  const { keepLook = true } = options;
+  const pose = POSES[key];
+  if (!petSvgReady || !petSvg || !pose) return false;
+
+  for (const p of Object.values(POSES)) {
+    const g = petSvg.getElementById(p.id);
+    if (g) g.style.display = 'none';
+  }
+
+  const group = petSvg.getElementById(pose.id);
+  if (!group) return false;
+  group.style.display = '';
+  petSvg.setAttribute('viewBox', poseViewBox(pose));
+
+  lookEnabled = key === 'idle' && keepLook;
+  if (key !== 'idle') {
+    resetIdleEyes(true);
+  }
+
+  return true;
+}
+
+async function loadSvgPet() {
+  const res = await fetch(SVG_PET_URL);
+  if (!res.ok) throw new Error(`SVG fetch failed: ${res.status}`);
+  const text = await res.text();
+  pet.innerHTML = text;
+  petSvg = pet.querySelector('svg');
+  if (!petSvg) throw new Error('SVG root missing');
+
+  petSvg.removeAttribute('width');
+  petSvg.removeAttribute('height');
+  petSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+  petSvg.style.width = '100%';
+  petSvg.style.height = '100%';
+  petSvg.style.display = 'block';
+  petSvg.style.overflow = 'visible';
+  petSvg.setAttribute('pointer-events', 'none');
+
+  const idle = petSvg.getElementById('Idle');
+  if (idle) {
+    idleEyeR = idle.querySelector('[id^="Eye_ball_2"]');
+    idleEyeL = idle.querySelector('[id^="Eye_ball_1"]');
+  }
+
+  for (const p of Object.values(POSES)) {
+    const g = petSvg.getElementById(p.id);
+    if (g) g.style.display = 'none';
+  }
+
+  // Reference frame only (180×180 safe) — never shown as a play pose.
+  const safeArea = petSvg.getElementById('Fla_Base_Safe_area');
+  if (safeArea) safeArea.style.display = 'none';
+
+  petSvgReady = true;
+  showPose('idle');
+  resetIdleEyes(true);
+}
+
+function setLookTargetFromDirection(dir) {
+  const ends = (dir && EYE_LOOK[dir]) || { L: EYE_IDLE.L, R: EYE_IDLE.R };
+  eyeTargetL = { x: ends.L.x, y: ends.L.y };
+  eyeTargetR = { x: ends.R.x, y: ends.R.y };
+}
+
+function lerpEyes() {
+  eyeCurL.x += (eyeTargetL.x - eyeCurL.x) * LOOK_LERP;
+  eyeCurL.y += (eyeTargetL.y - eyeCurL.y) * LOOK_LERP;
+  eyeCurR.x += (eyeTargetR.x - eyeCurR.x) * LOOK_LERP;
+  eyeCurR.y += (eyeTargetR.y - eyeCurR.y) * LOOK_LERP;
+  setEyeTransform(idleEyeL, eyeCurL);
+  setEyeTransform(idleEyeR, eyeCurR);
+}
+
+function updateLookAtMouse(cursor) {
+  if (!lookEnabled || currentSprite !== 'idle' || !petSvgReady) return;
+  if (!areFeaturesReady()) return;
+
+  if (
+    isSpeaking
+    || isDragFrozen
+    || isPointerSession
+    || isTransitioning
+    || isMouseSleeping
+    || isSnoozed
+    || !isPetVisible
+  ) {
+    setLookTargetFromDirection(null);
+    lerpEyes();
+    return;
+  }
+
+  if (!cursor || !screenCache) {
+    setLookTargetFromDirection(null);
+    lerpEyes();
+    return;
+  }
+
+  const petSize = screenCache.petSize || WIN_PET;
+  const cx = petX + petSize * 0.5;
+  const cy = petY + petSize * 0.35;
+  const dx = cursor.x - cx;
+  const dy = cursor.y - cy;
+  const dist = Math.hypot(dx, dy);
+
+  if (dist < lookDeadzonePx) {
+    setLookTargetFromDirection(null);
+  } else {
+    setLookTargetFromDirection(getDirection(dx, dy));
+  }
+  lerpEyes();
+}
+
+async function lookLoop() {
+  while (true) {
+    try {
+      if (petSvgReady && isPetVisible && !isSnoozed && areFeaturesReady()) {
+        // Re-enable look only after gate + idle pose.
+        if (currentSprite === 'idle' && !lookEnabled) {
+          lookEnabled = true;
+        }
+        const cursor = await fetchCursorWork();
+        updateLookAtMouse(cursor);
+      }
+    } catch (err) {
+      logError('lookLoop', err);
+    }
+    await sleep(LOOK_TICK_MS);
+  }
 }
 
 function resetStuckState() {
@@ -251,13 +766,17 @@ function cancelDragMoveSync() {
     cancelAnimationFrame(dragSyncRaf);
     dragSyncRaf = null;
   }
+  if (dragFollowRaf) {
+    cancelAnimationFrame(dragFollowRaf);
+    dragFollowRaf = null;
+  }
 }
 
 function scheduleDragMoveSync() {
   if (dragSyncRaf) return;
   dragSyncRaf = requestAnimationFrame(() => {
     dragSyncRaf = null;
-    if (!isActivelyDragging) return;
+    if (!isActivelyDragging && !isDragSettling) return;
     flushDragWindowPosition();
   });
 }
@@ -284,21 +803,82 @@ function flushDragWindowPosition() {
   }
 }
 
+/**
+ * Constant-speed seek toward dragTarget (graph-assisted targets OK).
+ * Target may be unclamped; petX/petY are clamped when applied.
+ * Runs while button held or while settling after release.
+ * While actively dragging, keep RAF alive even when dist < 1 (edge cling).
+ */
+function ensureDragFollowLoop() {
+  if (dragFollowRaf) return;
+
+  const tick = () => {
+    dragFollowRaf = null;
+    if (!isActivelyDragging && !isDragSettling) return;
+
+    const dx = dragTargetX - petX;
+    const dy = dragTargetY - petY;
+    const dist = Math.hypot(dx, dy);
+
+    if (dist < 1) {
+      const snapped = clampPetPosition(dragTargetX, dragTargetY);
+      petX = snapped.x;
+      petY = snapped.y;
+      scheduleDragMoveSync();
+      // Keep seeking while button held — mouse may still be outside clamped bounds.
+      if (isActivelyDragging) {
+        dragFollowRaf = requestAnimationFrame(tick);
+      }
+      return;
+    }
+
+    const step = Math.min(dist, DRAG_SPEED_PX);
+    petX += (dx / dist) * step;
+    petY += (dy / dist) * step;
+    const clamped = clampPetPosition(petX, petY);
+    petX = clamped.x;
+    petY = clamped.y;
+    scheduleDragMoveSync();
+
+    if (isActivelyDragging || isDragSettling) {
+      dragFollowRaf = requestAnimationFrame(tick);
+    }
+  };
+
+  dragFollowRaf = requestAnimationFrame(tick);
+}
+
 function updateDragPosition(workX, workY) {
   if (!isActivelyDragging || !dragGrab) return;
 
-  const rawX = workX - dragGrab.offsetX;
-  const rawY = workY - dragGrab.offsetY;
-  const clamped = clampPetPosition(rawX, rawY);
+  lastDragWork = { x: workX, y: workY };
+  // Store unclamped mouse-derived target; clamp only when applying pet position.
+  dragTargetX = workX - dragGrab.offsetX;
+  dragTargetY = workY - dragGrab.offsetY;
+  ensureDragFollowLoop();
+}
 
-  if (clamped.x !== rawX || clamped.y !== rawY) {
-    dragGrab.offsetX = workX - clamped.x;
-    dragGrab.offsetY = workY - clamped.y;
+/** After release: keep seeking at same speed until final (graph-snapped) target. */
+async function settleDragToTarget(tx, ty) {
+  isDragSettling = true;
+  const clamped = clampPetPosition(tx, ty);
+  dragTargetX = clamped.x;
+  dragTargetY = clamped.y;
+  ensureDragFollowLoop();
+
+  while (isDragSettling) {
+    const dist = Math.hypot(dragTargetX - petX, dragTargetY - petY);
+    if (dist < 1.25) {
+      petX = dragTargetX;
+      petY = dragTargetY;
+      await syncWindowPosition(true);
+      break;
+    }
+    await sleep(MOVE_TICK_MS);
   }
 
-  petX = clamped.x;
-  petY = clamped.y;
-  scheduleDragMoveSync();
+  isDragSettling = false;
+  cancelDragMoveSync();
 }
 
 function setBubbleUi(visible) {
@@ -355,7 +935,7 @@ function buildGrid(area) {
   }
 
   const petSize = area.petSize || WIN_PET;
-  const dz = DEADZONE_PX;
+  const dz = activeDeadzonePx;
   const left = dz;
   const top = dz;
   const right = Math.max(left, area.width - dz - petSize);
@@ -438,23 +1018,129 @@ function pickWalkTarget() {
   return node;
 }
 
-/** Prefer a grid node far from the cursor (mouse-avoid retarget). */
-function pickNodeAwayFromMouse(cursor, avoidId = null) {
+/**
+ * 4-cardinal side of cursor relative to pet.
+ * Used for mouse-flee (not 8-dir — fewer flips).
+ */
+function getCardinalSide(dx, dy) {
+  if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return null;
+  if (Math.abs(dx) >= Math.abs(dy)) return dx > 0 ? 'e' : 'w';
+  return dy > 0 ? 's' : 'n';
+}
+
+/** Grid pool on the side opposite the mouse (flee away). */
+function poolOppositeSide(side) {
+  if (!gridNodes.length) return [];
+  if (side === 'e') return gridNodes.filter((n) => n.col === 0);
+  if (side === 'w') return gridNodes.filter((n) => n.col === 2);
+  if (side === 's') return gridNodes.filter((n) => n.row === 0);
+  if (side === 'n') return gridNodes.filter((n) => n.row === 2);
+  return [];
+}
+
+function pickNodeOppositeSide(side, avoidId = null) {
   if (!gridNodes.length && screenCache) buildGrid(screenCache);
-  if (!gridNodes.length || !cursor) return null;
+  const pool = poolOppositeSide(side).filter((n) => avoidId == null || n.id !== avoidId);
+  if (!pool.length) return null;
 
-  const ranked = gridNodes
-    .filter((n) => avoidId == null || n.id !== avoidId)
-    .map((n) => ({
-      node: n,
-      d: Math.hypot(n.x - cursor.x, n.y - cursor.y),
-    }))
-    .sort((a, b) => b.d - a.d);
+  // Prefer farthest from current pet among that side.
+  let best = pool[0];
+  let bestD = -1;
+  for (const n of pool) {
+    const d = Math.hypot(n.x - petX, n.y - petY);
+    if (d > bestD) {
+      bestD = d;
+      best = n;
+    }
+  }
+  return best;
+}
 
-  if (!ranked.length) return null;
-  const seed = Math.floor(petX + petY + cursor.x + cursor.y);
-  const top = ranked.slice(0, Math.min(3, ranked.length));
-  return top[seed % top.length].node;
+function clearMouseFleeState() {
+  mouseFleeSide = null;
+  mouseFleeNearActive = false;
+  mouseFleeDidFlee = false;
+  mouseFleeLastCheckAt = 0;
+  mouseFleeLastMousePos = null;
+  mouseFleePendingSide = null;
+  mouseFleePendingAt = 0;
+}
+
+/**
+ * Mouse-flee destination (opposite grid side).
+ * - Enter near → change destination ONCE.
+ * - Same mouse cardinal while still near → no retarget (pet walking past a static mouse does not flip).
+ * - Mouse moves to another cardinal → MOUSE_FLEE_CHECK_MS confirm, then retarget once.
+ * Checks at most every MOUSE_FLEE_CHECK_MS; new side changes require meaningful mouse delta.
+ */
+function evaluateMouseFleeTarget(cursor, avoidId = null) {
+  if (!cursor) {
+    clearMouseFleeState();
+    return null;
+  }
+  if (!isCursorNearPet(cursor)) {
+    clearMouseFleeState();
+    return null;
+  }
+
+  const now = Date.now();
+  if (now - mouseFleeLastCheckAt < MOUSE_FLEE_CHECK_MS) {
+    return null;
+  }
+  mouseFleeLastCheckAt = now;
+
+  const c = petCenterWork();
+  const side = getCardinalSide(cursor.x - c.x, cursor.y - c.y);
+  if (!side) return null;
+
+  const mouseMoved = !mouseFleeLastMousePos
+    || Math.hypot(
+      cursor.x - mouseFleeLastMousePos.x,
+      cursor.y - mouseFleeLastMousePos.y,
+    ) >= MOUSE_FLEE_MOVE_PX;
+
+  // First enter near radius → flee once to opposite grid side.
+  if (!mouseFleeNearActive || !mouseFleeDidFlee) {
+    mouseFleeNearActive = true;
+    mouseFleeDidFlee = true;
+    mouseFleeSide = side;
+    mouseFleeLastMousePos = { x: cursor.x, y: cursor.y };
+    mouseFleePendingSide = null;
+    mouseFleePendingAt = 0;
+    return pickNodeOppositeSide(side, avoidId);
+  }
+
+  // Same locked side → no retarget; clear any pending.
+  if (side === mouseFleeSide) {
+    mouseFleePendingSide = null;
+    mouseFleePendingAt = 0;
+    if (mouseMoved) {
+      mouseFleeLastMousePos = { x: cursor.x, y: cursor.y };
+    }
+    return null;
+  }
+
+  // Confirming a previously detected side change (flee-check loop) — mouse may be still.
+  if (mouseFleePendingSide === side) {
+    if (now - mouseFleePendingAt < MOUSE_FLEE_CHECK_MS) {
+      return null;
+    }
+    mouseFleeSide = side;
+    mouseFleeLastMousePos = { x: cursor.x, y: cursor.y };
+    mouseFleePendingSide = null;
+    mouseFleePendingAt = 0;
+    return pickNodeOppositeSide(side, avoidId);
+  }
+
+  // New cardinal vs locked — only start pending if the mouse itself moved
+  // (pet walking past a static cursor must not flip sides).
+  if (!mouseMoved) {
+    return null;
+  }
+  mouseFleeLastMousePos = { x: cursor.x, y: cursor.y };
+  mouseFleePendingSide = side;
+  mouseFleePendingAt = now;
+  return null;
 }
 
 async function fetchCursorWork() {
@@ -508,6 +1194,7 @@ function teleportToNode(node) {
   walkTarget = null;
   lastDirection = null;
   warpCooldownUntil = Date.now() + WARP_COOLDOWN_MS;
+  playSfx(sfxMove);
   setSpriteDirect('idle', true);
 }
 
@@ -545,17 +1232,12 @@ function stopVoice() {
 }
 
 function playClickNote() {
-  try {
-    noteS.pause();
-    noteS.currentTime = 0;
-    noteS.play().catch(() => {});
-  } catch (err) {
-    logError('playClickNote', err);
-  }
+  playSfx(sfxClick || noteS);
 }
 
 function forceIdleSprite() {
-  pet.src = SPRITES.idle;
+  // Idle is the safe base; Look re-arms only after feature gate via lookLoop.
+  showPose('idle', { keepLook: false });
   currentSprite = 'idle';
 }
 
@@ -570,6 +1252,8 @@ function interruptForDrag() {
   isSpeaking = false;
   isTransitioning = false;
   lastDirection = null;
+  walkTarget = null;
+  skipNextIdle = false;
   speakStartedAt = 0;
   stopVoice();
   bubble.classList.add('hidden');
@@ -622,7 +1306,7 @@ async function runFadeSequence(gen, options = {}) {
       if (finishOnIdle) forceIdleSprite();
       return 'aborted';
     }
-    pet.src = frame;
+    showPose(frame);
     currentSprite = 'fade';
     await sleep(FADE_FRAME_MS);
     if (gen !== fadeGen) return 'cancelled';
@@ -638,12 +1322,10 @@ async function runFadeSequence(gen, options = {}) {
   return 'done';
 }
 
+/** Drag press: hold Fade_1 only (not the full fade1→fade2 sequence). */
 function startPressFade() {
-  const gen = bumpFadeGeneration();
-  runFadeSequence(gen, {
-    holdLastWhile: () => isPointerSession || isDragFrozen,
-    finishOnIdle: false,
-  }).catch((err) => logError('startPressFade', err));
+  bumpFadeGeneration();
+  setSpriteDirect('fade1', true);
 }
 
 async function playReleaseFade() {
@@ -697,7 +1379,7 @@ async function playSpeakAnimation(duration, generation) {
     && generation === speechGeneration
     && performance.now() - start < duration
   ) {
-    pet.src = SPEAK_FRAMES[i % SPEAK_FRAMES.length];
+    showPose(SPEAK_FRAMES[i % SPEAK_FRAMES.length]);
     i += 1;
     await sleep(SPEAK_FRAME_MS);
   }
@@ -705,13 +1387,16 @@ async function playSpeakAnimation(duration, generation) {
 
 function setSpriteDirect(key, force = false) {
   if (!key) return;
-  if (isDragFrozen && key !== 'idle') return;
+  // During drag freeze, only idle + fade1 + speak (awareness force) are allowed.
+  if (isDragFrozen && !force && key !== 'idle' && key !== 'fade1' && key !== 'speak') return;
   if (!force && key === currentSprite) return;
 
   if (key === 'speak') {
-    pet.src = SPEAK_FRAMES[0];
-  } else if (SPRITES[key]) {
-    pet.src = SPRITES[key];
+    showPose(SPEAK_FRAMES[0]);
+  } else if (POSES[key]) {
+    showPose(key);
+  } else {
+    return;
   }
   currentSprite = key;
 }
@@ -763,7 +1448,8 @@ function getDirection(dx, dy) {
 }
 
 function shouldAbortAi() {
-  return isSnoozed || isDragFrozen || !isPetVisible || isMouseSleeping;
+  return isSnoozed || isDragFrozen || !isPetVisible || isMouseSleeping
+    || awarenessPriorityActive || shellBusyActive;
 }
 
 /**
@@ -785,8 +1471,11 @@ function unlockPetInput(_reason = '') {
 
 async function pausePet() {
   // Soft-hide stages: stop walk / speech / SFX. Window stays alive (opacity handled in main).
+  await hardResetStagesForTrayPipe();
   const gen = ++visibilityGen;
   isPetVisible = false;
+  beginFeatureGate();
+  playSfx(sfxHide);
 
   dragReleaseGen += 1;
   speechGeneration += 1;
@@ -801,7 +1490,10 @@ async function pausePet() {
   if (isPointerSession || isDragFrozen) {
     await cancelPointerSessionQuiet();
   }
-  if (gen !== visibilityGen) return;
+  if (gen !== visibilityGen) {
+    notifyShellReady('pausePet-stale');
+    return;
+  }
 
   try {
     if (window.petAPI?.exitDragMode) {
@@ -810,18 +1502,24 @@ async function pausePet() {
   } catch (err) {
     logError('pausePet exitDragMode', err);
   }
-  if (gen !== visibilityGen) return;
+  if (gen !== visibilityGen) {
+    notifyShellReady('pausePet-stale');
+    return;
+  }
 
   resetDragState();
   releaseActivePointer();
   forceIdleSprite();
   resetSnoozeTaps();
+  if (gen === visibilityGen) notifyShellReady('pausePet');
 }
 
 async function resumePet() {
   // Reverse of pause: unlock click flags first (same pipe every wake).
   const gen = ++visibilityGen;
+  beginFeatureGate();
   unlockPetInput('resumePet');
+  playSfx(sfxShow);
 
   dragReleaseGen += 1;
   speechGeneration += 1;
@@ -836,11 +1534,17 @@ async function resumePet() {
 
   try {
     await refreshScreenSize();
-    if (gen !== visibilityGen) return;
+    if (gen !== visibilityGen) {
+      notifyShellReady('resumePet-stale');
+      return;
+    }
 
     lastSync = { x: -1, y: -1, w: -1, h: -1 };
     await syncWindowPosition(true);
-    if (gen !== visibilityGen) return;
+    if (gen !== visibilityGen) {
+      notifyShellReady('resumePet-stale');
+      return;
+    }
 
     // Wake may race with a stale pause — unlock again after awaits.
     if (gen === visibilityGen) unlockPetInput('resumePet-after-sync');
@@ -849,9 +1553,297 @@ async function resumePet() {
       await window.petAPI.restoreWindowShell();
     }
     if (gen === visibilityGen) unlockPetInput('resumePet-done');
+
+    // Close shellBusy (Tray pipe) before Show talk — talk is Stage other.
+    if (gen === visibilityGen) notifyShellReady('resumePet');
+
+    if (gen === visibilityGen) {
+      try {
+        await maybeSpeakOnSoftShow(gen);
+      } catch (err) {
+        logError('maybeSpeakOnSoftShow', err);
+      }
+    }
   } catch (err) {
     logError('resumePet', err);
     unlockPetInput('resumePet-error');
+    notifyShellReady('resumePet-error');
+  }
+}
+
+function pickShowSpeechPhrase(roundIndex) {
+  const cats = localePack.showCategories || [];
+  const cat = cats[roundIndex];
+  if (!cat || !cat.phrases || !cat.phrases.length) return null;
+  return pickFromPoolList(cat.phrases);
+}
+
+async function waitSoftShowSpeakSlot(gen) {
+  while (gen === visibilityGen) {
+    if (!isPetVisible || isSnoozed) return false;
+    if (awarenessPriorityActive) return false;
+    if (!areFeaturesReady()) {
+      await sleep(50);
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Soft-show speech: play ordered showCategories (JSON logline beats before leave).
+ * Holds showSpeech gate for the whole intro — Tray drop + block general awareness.
+ * Porn awareness may still seize (highest); then we yield via awarenessPriorityActive.
+ */
+async function maybeSpeakOnSoftShow(gen) {
+  if (awarenessPriorityActive) return;
+
+  const cats = localePack.showCategories || [];
+  const count = Math.max(1, cats.length);
+
+  const gateGen = await setShowSpeechGate(true);
+  try {
+    for (let i = 0; i < count; i += 1) {
+      const ready = await waitSoftShowSpeakSlot(gen);
+      if (!ready || gen !== visibilityGen || !isPetVisible || isSnoozed) return;
+      if (awarenessPriorityActive) return;
+
+      walkTarget = null;
+      skipNextIdle = false;
+      if (isPointerSession || isDragFrozen || isActivelyDragging) {
+        try {
+          await cancelPointerSessionQuiet();
+        } catch (err) {
+          logError('maybeSpeakOnSoftShow cancelPointer', err);
+        }
+      }
+
+      const phrase = pickShowSpeechPhrase(i);
+      if (!phrase) continue;
+      await startSpeaking(phrase, { force: true });
+    }
+  } finally {
+    // Only clear if we still own the gate (Tray hard-reset / newer Show may have bumped gen).
+    if (gateGen === showSpeechGateGen) {
+      await setShowSpeechGate(false);
+    }
+  }
+}
+
+/**
+ * Size change = soft hide → apply scale → soft show.
+ * Same interrupt/reset pipe as tray hide/show so AI / drag / look never continue mid-work.
+ * No hide/show SFX and no window opacity (pet stays on screen while footprint updates).
+ */
+async function rebootstrapAfterSizeChange(level) {
+  const next = Math.max(1, Math.min(8, Math.floor(Number(level) || 1)));
+  // Same level (e.g. echo) — do not bump visibilityGen or kill Show speech.
+  if (next === petSizeLevel) return;
+
+  await hardResetStagesForTrayPipe();
+
+  const pauseGen = ++visibilityGen;
+  isPetVisible = false;
+  beginFeatureGate();
+
+  dragReleaseGen += 1;
+  speechGeneration += 1;
+  isSpeaking = false;
+  isTransitioning = false;
+  speakStartedAt = 0;
+  isMouseSleeping = false;
+  walkTarget = null;
+  lastDirection = null;
+  mouseFleeDidFlee = false;
+  mouseFleePendingSide = null;
+  skipNextIdle = false;
+  stopVoice();
+  hideBubble();
+  bumpFadeGeneration();
+
+  if (isPointerSession || isDragFrozen) {
+    await cancelPointerSessionQuiet();
+  }
+  if (pauseGen !== visibilityGen) {
+    notifyShellReady('size-stale');
+    return;
+  }
+
+  try {
+    if (window.petAPI?.exitDragMode) {
+      await window.petAPI.exitDragMode();
+    }
+  } catch (err) {
+    logError('rebootstrapAfterSizeChange exitDragMode', err);
+  }
+  if (pauseGen !== visibilityGen) {
+    notifyShellReady('size-stale');
+    return;
+  }
+
+  resetDragState();
+  releaseActivePointer();
+  forceIdleSprite();
+  resetSnoozeTaps();
+
+  applyPetSizeLevel(next);
+
+  const resumeGen = ++visibilityGen;
+  beginFeatureGate();
+  unlockPetInput('size-rebootstrap');
+
+  dragReleaseGen += 1;
+  speechGeneration += 1;
+  isSpeaking = false;
+  isTransitioning = false;
+  speakStartedAt = 0;
+  stopVoice();
+  hideBubble();
+  bumpFadeGeneration();
+  forceIdleSprite();
+  resetSnoozeTaps();
+
+  try {
+    await refreshScreenSize();
+    if (resumeGen !== visibilityGen) {
+      notifyShellReady('size-stale');
+      return;
+    }
+
+    lastSync = { x: -1, y: -1, w: -1, h: -1 };
+    await syncWindowPosition(true);
+    if (resumeGen !== visibilityGen) {
+      notifyShellReady('size-stale');
+      return;
+    }
+
+    if (resumeGen === visibilityGen) unlockPetInput('size-rebootstrap-after-sync');
+
+    if (window.petAPI?.restoreWindowShell) {
+      await window.petAPI.restoreWindowShell();
+    }
+    if (resumeGen === visibilityGen) unlockPetInput('size-rebootstrap-done');
+
+    // Close Tray shell before Show talk (Stage other).
+    if (resumeGen === visibilityGen) notifyShellReady('size-rebootstrap');
+
+    if (resumeGen === visibilityGen && isPetVisible) {
+      try {
+        await maybeSpeakOnSoftShow(resumeGen);
+      } catch (err) {
+        logError('rebootstrapAfterSizeChange showSpeech', err);
+      }
+    }
+  } catch (err) {
+    logError('rebootstrapAfterSizeChange', err);
+    unlockPetInput('size-rebootstrap-error');
+    notifyShellReady('size-rebootstrap-error');
+  }
+}
+
+/**
+ * Locale change = soft hide → apply pack → soft show (same pipe as Size).
+ */
+async function rebootstrapAfterLocaleChange(pack) {
+  await hardResetStagesForTrayPipe();
+
+  applyLocalePack(pack);
+
+  const pauseGen = ++visibilityGen;
+  isPetVisible = false;
+  beginFeatureGate();
+
+  dragReleaseGen += 1;
+  speechGeneration += 1;
+  isSpeaking = false;
+  isTransitioning = false;
+  speakStartedAt = 0;
+  isMouseSleeping = false;
+  walkTarget = null;
+  lastDirection = null;
+  mouseFleeDidFlee = false;
+  mouseFleePendingSide = null;
+  skipNextIdle = false;
+  stopVoice();
+  hideBubble();
+  bumpFadeGeneration();
+
+  if (isPointerSession || isDragFrozen) {
+    await cancelPointerSessionQuiet();
+  }
+  if (pauseGen !== visibilityGen) {
+    notifyShellReady('locale-stale');
+    return;
+  }
+
+  try {
+    if (window.petAPI?.exitDragMode) {
+      await window.petAPI.exitDragMode();
+    }
+  } catch (err) {
+    logError('rebootstrapAfterLocaleChange exitDragMode', err);
+  }
+  if (pauseGen !== visibilityGen) {
+    notifyShellReady('locale-stale');
+    return;
+  }
+
+  resetDragState();
+  releaseActivePointer();
+  forceIdleSprite();
+  resetSnoozeTaps();
+
+  const resumeGen = ++visibilityGen;
+  beginFeatureGate();
+  unlockPetInput('locale-rebootstrap');
+
+  dragReleaseGen += 1;
+  speechGeneration += 1;
+  isSpeaking = false;
+  isTransitioning = false;
+  speakStartedAt = 0;
+  stopVoice();
+  hideBubble();
+  bumpFadeGeneration();
+  forceIdleSprite();
+  resetSnoozeTaps();
+
+  try {
+    await refreshScreenSize();
+    if (resumeGen !== visibilityGen) {
+      notifyShellReady('locale-stale');
+      return;
+    }
+
+    lastSync = { x: -1, y: -1, w: -1, h: -1 };
+    await syncWindowPosition(true);
+    if (resumeGen !== visibilityGen) {
+      notifyShellReady('locale-stale');
+      return;
+    }
+
+    if (resumeGen === visibilityGen) unlockPetInput('locale-rebootstrap-after-sync');
+
+    if (window.petAPI?.restoreWindowShell) {
+      await window.petAPI.restoreWindowShell();
+    }
+    if (resumeGen === visibilityGen) unlockPetInput('locale-rebootstrap-done');
+
+    // Close Tray shell before Show talk (Stage other).
+    if (resumeGen === visibilityGen) notifyShellReady('locale-rebootstrap');
+
+    if (resumeGen === visibilityGen && isPetVisible) {
+      try {
+        await maybeSpeakOnSoftShow(resumeGen);
+      } catch (err) {
+        logError('rebootstrapAfterLocaleChange showSpeech', err);
+      }
+    }
+  } catch (err) {
+    logError('rebootstrapAfterLocaleChange', err);
+    unlockPetInput('locale-rebootstrap-error');
+    notifyShellReady('locale-rebootstrap-error');
   }
 }
 
@@ -871,11 +1863,11 @@ async function idlePhase(durationMs) {
 
 /** Straight-line tween from current position (n) to target node B. */
 async function tweenToNode(target) {
-  if (!target || shouldAbortAi() || isSpeaking) return false;
+  if (!target || shouldAbortAi() || isSpeaking || isMovementLocked) return false;
 
   let currentTarget = target;
 
-  while (currentTarget && !shouldAbortAi() && !isSpeaking) {
+  while (currentTarget && !shouldAbortAi() && !isSpeaking && !isMovementLocked) {
     const startX = petX;
     const startY = petY;
     const endX = currentTarget.x;
@@ -892,8 +1884,12 @@ async function tweenToNode(target) {
       walkTarget = null;
       setSpriteDirect('idle');
       lastDirection = null;
+      playSfx(sfxMove);
       return true;
     }
+
+    // Start of this leg (also covers post-retarget new destination).
+    playSfx(sfxMove);
 
     const dir = getDirection(dx, dy);
     if (dir !== 'idle') {
@@ -907,19 +1903,16 @@ async function tweenToNode(target) {
     let retarget = null;
 
     while (true) {
-      if (shouldAbortAi() || isSpeaking) {
+      if (shouldAbortAi() || isSpeaking || isMovementLocked) {
         return false;
       }
 
-      if (Date.now() >= mouseRetargetUntil) {
+      {
         const cursor = await fetchCursorWork();
-        if (isCursorNearPet(cursor)) {
-          const away = pickNodeAwayFromMouse(cursor, currentTarget.id);
-          if (away && away.id !== currentTarget.id) {
-            mouseRetargetUntil = Date.now() + MOUSE_RETARGET_COOLDOWN_MS;
-            retarget = away;
-            break;
-          }
+        const away = evaluateMouseFleeTarget(cursor, currentTarget.id);
+        if (away && away.id !== currentTarget.id) {
+          retarget = away;
+          break;
         }
       }
 
@@ -945,6 +1938,7 @@ async function tweenToNode(target) {
     walkTarget = null;
     setSpriteDirect('idle');
     lastDirection = null;
+    playSfx(sfxMove);
     return true;
   }
 
@@ -952,6 +1946,7 @@ async function tweenToNode(target) {
 }
 
 async function movePhase() {
+  if (isMovementLocked) return;
   if (!screenCache) await refreshScreenSize();
   if (!gridNodes.length) buildGrid(screenCache);
 
@@ -965,25 +1960,45 @@ async function movePhase() {
 }
 
 async function cornerWarpPhase() {
-  if (shouldAbortAi() || isSpeaking) return;
+  if (shouldAbortAi() || isSpeaking || isMovementLocked) return;
   if (!screenCache) await refreshScreenSize();
   if (!gridNodes.length) buildGrid(screenCache);
 
-  const seed = Math.floor(petX + petY + Date.now());
-  const target = pickCornerNode(seed);
-  if (!target) return;
+  const corners = getCornerNodes();
+  if (!corners.length) return;
 
-  setSpriteDirect('idle');
-  await playFade();
-  if (shouldAbortAi() || isSpeaking) return;
+  let lastId = nearestNode(petX, petY)?.id ?? -1;
+  const baseSeed = Math.floor(petX + petY + Date.now());
 
-  teleportToNode(target);
-  lastSync = { x: -1, y: -1, w: -1, h: -1 };
-  await syncWindowPosition(true);
+  // One warp stage = WARP_HOPS corner teleports in a row.
+  for (let hop = 0; hop < WARP_HOPS; hop += 1) {
+    if (shouldAbortAi() || isSpeaking || isMovementLocked) return;
+
+    let target = null;
+    for (let tryN = 0; tryN < corners.length * 2; tryN += 1) {
+      const candidate = pickCornerNode(baseSeed + hop * 7 + tryN);
+      if (candidate && candidate.id !== lastId) {
+        target = candidate;
+        break;
+      }
+    }
+    if (!target) target = pickCornerNode(baseSeed + hop);
+    if (!target) continue;
+
+    setSpriteDirect('idle');
+    await playFade();
+    if (shouldAbortAi() || isSpeaking || isMovementLocked) return;
+
+    teleportToNode(target);
+    lastId = target.id;
+    lastSync = { x: -1, y: -1, w: -1, h: -1 };
+    await syncWindowPosition(true);
+  }
 }
 
-function showBubble(text) {
-  if (isDragFrozen) return;
+function showBubble(text, options = {}) {
+  const force = !!options.force;
+  if (!force && isDragFrozen) return;
   speechText.textContent = text;
   bubble.classList.remove('hidden');
   setBubbleUi(true);
@@ -998,8 +2013,21 @@ function speechDuration(text) {
   return Math.max(6000, 1500 + text.length * 80);
 }
 
-async function startSpeaking(text) {
-  if (isSpeaking || isDragFrozen) return;
+/**
+ * @param {string} text
+ * @param {{ force?: boolean }} [options] force = awareness priority (ignore drag/walk locks)
+ */
+async function startSpeaking(text, options = {}) {
+  const force = !!options.force;
+  if (!force && (isSpeaking || isDragFrozen)) return;
+
+  if (force && isSpeaking) {
+    speechGeneration += 1;
+    isSpeaking = false;
+    speakStartedAt = 0;
+    stopVoice();
+    hideBubble();
+  }
 
   const generation = speechGeneration + 1;
   speechGeneration = generation;
@@ -1010,10 +2038,15 @@ async function startSpeaking(text) {
     stopVoice();
     if (generation !== speechGeneration) return;
 
-    await transitionTo('speak');
-    if (generation !== speechGeneration) return;
+    if (force) {
+      // Skip fade transition — awareness must not be aborted by AI/drag gates.
+      setSpriteDirect('speak', true);
+    } else {
+      await transitionTo('speak');
+      if (generation !== speechGeneration) return;
+    }
 
-    showBubble(text);
+    showBubble(text, { force });
     const duration = speechDuration(text);
     const pattern = randomRhythm();
 
@@ -1034,9 +2067,13 @@ async function startSpeaking(text) {
     isSpeaking = false;
     lastDirection = null;
 
-    if (!isSnoozed && !isDragFrozen) {
+    if (!isSnoozed && (!isDragFrozen || force)) {
       try {
-        await transitionTo('idle');
+        if (force) {
+          forceIdleSprite();
+        } else {
+          await transitionTo('idle');
+        }
       } catch (err) {
         logError('startSpeaking->idle', err);
         setSpriteDirect('idle');
@@ -1046,7 +2083,7 @@ async function startSpeaking(text) {
 }
 
 function randomPhrase() {
-  return THAI_PHRASES[Math.floor(Math.random() * THAI_PHRASES.length)];
+  return pickFromPoolList(localePack.pools?.idle) || 'Hi';
 }
 
 async function enterMouseSleep() {
@@ -1066,7 +2103,7 @@ async function enterMouseSleep() {
     await cancelPointerSessionQuiet();
   }
 
-  pet.src = FADE_FRAMES[0];
+  showPose('sleep');
   currentSprite = 'sleep';
 }
 
@@ -1077,7 +2114,7 @@ async function wakeFromMouseSleep() {
   lastMouseActiveAt = Date.now();
   bumpFadeGeneration();
 
-  pet.src = FADE_FRAMES[1];
+  showPose('fade2');
   currentSprite = 'wake';
   await sleep(FADE_FRAME_MS * 2);
 
@@ -1141,6 +2178,11 @@ async function aiLoop() {
       continue;
     }
 
+    if (!areFeaturesReady()) {
+      await sleep(50);
+      continue;
+    }
+
     if (isSpeaking || isTransitioning) {
       await sleep(200);
       continue;
@@ -1149,6 +2191,20 @@ async function aiLoop() {
     resetStuckState();
 
     try {
+      if (isMovementLocked) {
+        walkTarget = null;
+        if (currentSprite !== 'idle' && currentSprite !== 'speak') {
+          setSpriteDirect('idle');
+        }
+        const idleMs = randBetween(5, 10) * 1000;
+        await idlePhase(idleMs);
+        if (shouldAbortAi() || isSpeaking || isMovementLocked) continue;
+        if (Math.random() < 0.35) {
+          await startSpeaking(randomPhrase());
+        }
+        continue;
+      }
+
       const shouldSkipIdle = skipNextIdle || !!walkTarget;
       if (skipNextIdle) skipNextIdle = false;
 
@@ -1198,14 +2254,8 @@ async function handleSnooze(e) {
 
   if (isSnoozed || !isPetVisible) return;
 
-  snoozeTapCount = 0;
-  lastSnoozeTapAt = 0;
-
-  if (isPointerSession) {
-    await cancelPointerSessionQuiet();
-  }
-  cancelSpeaking();
-  stopVoice();
+  // Stage Snooze: interrupt other → idle, then soft-hide (existing pipe).
+  await enterSnoozeSettlePath();
 
   isSnoozed = true;
   try {
@@ -1227,13 +2277,15 @@ function resetSnoozeTaps() {
 
 function registerSnoozeTap() {
   const now = Date.now();
+
+  // Locked or unlocked: same multi-tap (snoozeTapsNeeded). Lock ≠ one-click hide.
   if (now - lastSnoozeTapAt > SNOOZE_TAP_GAP_MS) {
     snoozeTapCount = 0;
   }
   lastSnoozeTapAt = now;
   snoozeTapCount += 1;
 
-  if (snoozeTapCount >= SNOOZE_TAPS_NEEDED) {
+  if (snoozeTapCount >= snoozeTapsNeeded) {
     snoozeTapCount = 0;
     lastSnoozeTapAt = 0;
     handleSnooze().catch((err) => logError('snooze taps', err));
@@ -1260,9 +2312,11 @@ function resetDragState() {
   isDragFrozen = false;
   isEndingDrag = false;
   isActivelyDragging = false;
+  isDragSettling = false;
   dragDownPos = null;
   dragGrab = null;
   pointerDownWork = null;
+  lastDragWork = null;
   activePointerId = null;
   pointerSessionStartedAt = 0;
   endingDragStartedAt = 0;
@@ -1302,6 +2356,9 @@ function releaseActivePointer() {
 }
 
 function beginDragSession(e) {
+  // Shell loading or awareness — drop clicks until ready.
+  if (shellBusyActive || awarenessPriorityActive || awarenessSpeakLock) return;
+
   // Hover/cursor already reached #pet — unlock flags that may still block after wake.
   unlockPetInput('beginDragSession');
   if (isPointerSession) return;
@@ -1310,6 +2367,11 @@ function beginDragSession(e) {
   if (isMouseSleeping) {
     wakeFromMouseSleep().catch((err) => logError('wakeFromMouseSleep drag', err));
   }
+
+  // Click/drag cancels walk stage — do not resume previous target on release.
+  walkTarget = null;
+  skipNextIdle = false;
+  lastDirection = null;
 
   isPointerSession = true;
   pointerSessionStartedAt = Date.now();
@@ -1321,6 +2383,10 @@ function beginDragSession(e) {
     offsetX: pointerDownWork.x - petX,
     offsetY: pointerDownWork.y - petY,
   };
+  dragTargetX = petX;
+  dragTargetY = petY;
+  lastDragWork = { x: pointerDownWork.x, y: pointerDownWork.y };
+  isDragSettling = false;
 
   startActiveDrag();
 
@@ -1337,9 +2403,12 @@ function startActiveDrag() {
   isActivelyDragging = true;
   isDragFrozen = true;
   lastDirection = null;
+  walkTarget = null;
+  skipNextIdle = false;
   syncGeneration += 1;
 
   interruptForDrag();
+  forceIdleSprite();
   setDraggingUi(true);
   signalClickUx('press');
 
@@ -1349,7 +2418,7 @@ function startActiveDrag() {
 }
 
 function randomDragPhrase() {
-  return DRAG_RELEASE_PHRASES[Math.floor(Math.random() * DRAG_RELEASE_PHRASES.length)];
+  return pickFromPoolList(localePack.pools?.drag) || '...';
 }
 
 async function playDragComplaint(gen) {
@@ -1399,15 +2468,33 @@ async function finishDragSession() {
   isEndingDrag = true;
   endingDragStartedAt = Date.now();
   const gen = dragReleaseGen;
-  const startPos = dragDownPos ? { ...dragDownPos } : null;
-  const movedPx = startPos
-    ? Math.hypot(petX - startPos.petX, petY - startPos.petY)
+
+  const endWork = lastDragWork || pointerDownWork;
+  const movedPx = (pointerDownWork && endWork)
+    ? Math.hypot(endWork.x - pointerDownWork.x, endWork.y - pointerDownWork.y)
     : Infinity;
-  const wasTap = movedPx <= SNOOZE_TAP_MOVE_PX;
+  const wasTap = movedPx <= snoozeTapMovePx;
+
+  let finalX = petX;
+  let finalY = petY;
+  if (dragGrab && endWork) {
+    const raw = clampPetPosition(endWork.x - dragGrab.offsetX, endWork.y - dragGrab.offsetY);
+    finalX = raw.x;
+    finalY = raw.y;
+  }
+  // No grid snap on release — settle to final mouse-derived position only.
 
   try {
-    cancelDragMoveSync();
     releaseActivePointer();
+    isActivelyDragging = false;
+    setDraggingUi(false);
+
+    if (!wasTap) {
+      await settleDragToTarget(finalX, finalY);
+    } else {
+      cancelDragMoveSync();
+      isDragSettling = false;
+    }
 
     if (window.petAPI?.exitDragMode) {
       await window.petAPI.exitDragMode();
@@ -1415,15 +2502,13 @@ async function finishDragSession() {
 
     isPointerSession = false;
     isDragFrozen = false;
-    isActivelyDragging = false;
     dragDownPos = null;
     dragGrab = null;
     pointerDownWork = null;
+    lastDragWork = null;
     pointerSessionStartedAt = 0;
-    setDraggingUi(false);
 
     if (wasTap) {
-      // Logic first: count snooze taps. Animation is a separate fire-and-forget signal.
       lastSync = { x: -1, y: -1, w: -1, h: -1 };
       await syncWindowPosition(true);
       registerSnoozeTap();
@@ -1433,7 +2518,6 @@ async function finishDragSession() {
 
     resetSnoozeTaps();
 
-    // Current drop position is n; keep walkTarget B so AI can continue n→B.
     const { maxX, maxY } = getMoveBounds();
     const edges = getTriggerEdgesRaw(petX, petY, maxX, maxY);
     if (edges.length > 0) {
@@ -1446,20 +2530,17 @@ async function finishDragSession() {
   } catch (err) {
     logError('finishDragSession', err);
     resetDragState();
+    isDragSettling = false;
     resetSnoozeTaps();
     return;
   } finally {
     isEndingDrag = false;
     endingDragStartedAt = 0;
+    isDragSettling = false;
   }
 
-  if (wasTap) return;
-
-  // Drag release: signal UX only — do not block AI/logic on animation completion.
   signalClickUx('release-drag', gen);
-  if (walkTarget) {
-    skipNextIdle = true;
-  }
+  // Walk was cancelled on press — never resume a pre-drag walkTarget.
 }
 
 function onPointerMove(e) {
@@ -1536,6 +2617,34 @@ async function init() {
       return;
     }
 
+    await loadSvgPet();
+    beginFeatureGate();
+    applyPetSizeLevel(1);
+
+    try {
+      if (window.petAPI.getLocale) {
+        applyLocalePack(await window.petAPI.getLocale());
+      }
+    } catch (err) {
+      logError('init getLocale', err);
+    }
+
+    try {
+      if (window.petAPI.getPetSizeLevel) {
+        applyPetSizeLevel(await window.petAPI.getPetSizeLevel());
+      }
+    } catch (err) {
+      logError('init getPetSizeLevel', err);
+    }
+
+    try {
+      if (window.petAPI.getMovementLock) {
+        applyMovementLock(await window.petAPI.getMovementLock());
+      }
+    } catch (err) {
+      logError('init getMovementLock', err);
+    }
+
     await refreshScreenSize();
     setInterval(() => refreshScreenSize(), 3000);
     setInterval(resetStuckState, WATCHDOG_MS);
@@ -1544,7 +2653,7 @@ async function init() {
 
     const start = getDefaultPosition();
     setPetPosition(start.x, start.y);
-    setSpriteDirect('idle');
+    forceIdleSprite();
 
     const { maxX, maxY } = getMoveBounds();
     const startEdges = getTriggerEdges(petX, petY, maxX, maxY);
@@ -1572,6 +2681,45 @@ async function init() {
       });
     }
 
+    if (window.petAPI?.onMovementLock) {
+      window.petAPI.onMovementLock((locked) => {
+        applyMovementLock(locked);
+      });
+    }
+
+    if (window.petAPI?.onPetSizeLevel) {
+      window.petAPI.onPetSizeLevel((level) => {
+        const next = Math.max(1, Math.min(8, Math.floor(Number(level) || 1)));
+        if (next === petSizeLevel) return;
+        rebootstrapAfterSizeChange(next).catch((err) => {
+          logError('onPetSizeLevel rebootstrap', err);
+        });
+      });
+    }
+
+    if (window.petAPI?.onLocale) {
+      window.petAPI.onLocale((pack) => {
+        rebootstrapAfterLocaleChange(pack).catch((err) => {
+          logError('onLocale rebootstrap', err);
+        });
+      });
+    }
+
+    if (window.petAPI?.onShellBusy) {
+      window.petAPI.onShellBusy((busy) => {
+        shellBusyActive = !!busy;
+        if (shellBusyActive) {
+          clearClicksForShellBusy().catch((err) => logError('clearClicksForShellBusy', err));
+        }
+      });
+    }
+
+    if (window.petAPI?.onTrayPrepare) {
+      window.petAPI.onTrayPrepare(() => {
+        settleForTrayPrepare().catch((err) => logError('settleForTrayPrepare', err));
+      });
+    }
+
     if (window.petAPI?.onScreenChanged) {
       window.petAPI.onScreenChanged(async () => {
         if (!isPetVisible) return;
@@ -1581,9 +2729,22 @@ async function init() {
       });
     }
 
+    // --- App Awareness (feature 7) IPC ---
+    if (window.petAPI?.onAwarenessSpeak) {
+      window.petAPI.onAwarenessSpeak((payload) => {
+        awarenessHandleSpeak(payload).catch((err) => logError('awarenessHandleSpeak', err));
+      });
+    }
+    if (window.petAPI?.onAwarenessForceQuit) {
+      window.petAPI.onAwarenessForceQuit(() => {
+        awarenessForceQuit();
+      });
+    }
+
     setTimeout(() => {
       aiLoop().catch((err) => logError('aiLoop fatal', err));
       mouseWatchLoop().catch((err) => logError('mouseWatchLoop fatal', err));
+      lookLoop().catch((err) => logError('lookLoop fatal', err));
     }, 500);
   } catch (err) {
     logError('init', err);
@@ -1601,3 +2762,110 @@ window.addEventListener('unhandledrejection', (e) => {
 });
 
 init().catch((err) => logError('init', err));
+
+// =============================================================================
+// App Awareness (feature 7) — HIGHEST priority speak pipe + quit.
+// Overrides walk / drag / click / hide. Phrases chosen in main `awareness.js`.
+// =============================================================================
+
+let awarenessSpeakLock = false;
+let awarenessPriorityActive = false;
+let awarenessPriorityToken = 0;
+
+function awarenessForceQuit() {
+  try {
+    quitAppFromPet();
+  } catch (err) {
+    logError('awarenessForceQuit', err);
+  }
+}
+
+/** Stop walk/drag/AI toys so awareness lines 1→2→3 can always run. */
+async function seizeForAwareness() {
+  awarenessPriorityActive = true;
+  walkTarget = null;
+  skipNextIdle = false;
+  lastDirection = null;
+  isMouseSleeping = false;
+  isTransitioning = false;
+
+  dragReleaseGen += 1;
+  if (isSpeaking) {
+    speechGeneration += 1;
+    isSpeaking = false;
+    speakStartedAt = 0;
+    try {
+      stopVoice();
+      hideBubble();
+    } catch (_) { /* ignore */ }
+  }
+
+  if (isPointerSession || isDragFrozen || isActivelyDragging || isEndingDrag) {
+    try {
+      await cancelPointerSessionQuiet();
+    } catch (err) {
+      logError('seizeForAwareness cancelPointer', err);
+    }
+  }
+
+  resetDragState();
+  releaseActivePointer();
+  isDragFrozen = false;
+  isActivelyDragging = false;
+  isEndingDrag = false;
+}
+
+/**
+ * Forced awareness line. Always completes (even if pet soft-hidden — bubble may be invisible).
+ * @param {{ text?: string, thenQuit?: boolean, keepPriority?: boolean }} payload
+ */
+async function awarenessHandleSpeak(payload) {
+  const text = String(payload?.text || '').trim();
+  const thenQuit = !!payload?.thenQuit;
+  const keepPriority = !!payload?.keepPriority;
+
+  if (!text) {
+    if (thenQuit) awarenessForceQuit();
+    try {
+      if (window.petAPI?.awarenessSpeechDone) {
+        await window.petAPI.awarenessSpeechDone(thenQuit);
+      }
+    } catch (err) {
+      logError('awarenessSpeechDone empty', err);
+    }
+    return;
+  }
+
+  // Serialize awareness lines — wait for prior forced speak to finish (no skip).
+  const waitStart = Date.now();
+  while (awarenessSpeakLock && Date.now() - waitStart < 20000) {
+    await sleep(50);
+  }
+  awarenessSpeakLock = true;
+  ++awarenessPriorityToken;
+
+  try {
+    await seizeForAwareness();
+    await startSpeaking(text, { force: true });
+  } catch (err) {
+    logError('awarenessHandleSpeak speak', err);
+  } finally {
+    awarenessSpeakLock = false;
+    try {
+      if (window.petAPI?.awarenessSpeechDone) {
+        await window.petAPI.awarenessSpeechDone(thenQuit);
+      }
+    } catch (err) {
+      logError('awarenessSpeechDone', err);
+    }
+    if (thenQuit) {
+      awarenessPriorityActive = false;
+      awarenessForceQuit();
+    } else if (keepPriority) {
+      // Hold lock for chained rounds 1→2→3
+      awarenessPriorityActive = true;
+    } else {
+      awarenessPriorityActive = false;
+    }
+  }
+}

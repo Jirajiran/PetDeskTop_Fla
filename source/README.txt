@@ -1,4 +1,4 @@
-Fla_petDesktop_V32 — Source (ให้ปรับแต่ง / build เอง)
+Fla_petDesktop_V34 — Source (ให้ปรับแต่ง / build เอง)
 ====================================================
 
 รันทดสอบ:
@@ -7,6 +7,10 @@ Fla_petDesktop_V32 — Source (ให้ปรับแต่ง / build เอ�
 
 สร้าง Setup ใหม่ → ไฟล์ไปที่รากโปรเจกต์ (ข้าง README)
   npm run dist
-  → ../Fla_petDesktop_V32-Setup-*.exe
+  → ../Fla_petDesktop_V34-Setup-*.exe
 
 หลัง dist ลบ ../win-unpacked ได้ถ้ามี
+
+ส่งงานต่อ:
+  ../HANDOFF.md
+  ../.cursor/rules/fla-pet-desktop.mdc

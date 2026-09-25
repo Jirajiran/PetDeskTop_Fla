@@ -1,6 +1,8 @@
 :root {
-  --pet-size: 72px;
+  --pet-safe: 72px;
+  --pet-draw: 72px;
   --bubble-width: 84px;
+  --bubble-font: 11px;
 }
 
 * {
@@ -43,17 +45,25 @@ body {
 }
 
 #pet {
-  width: var(--pet-size);
-  height: var(--pet-size);
+  width: var(--pet-safe);
+  height: var(--pet-safe);
   flex-shrink: 0;
-  object-fit: contain;
-  object-position: bottom center;
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   pointer-events: auto;
   cursor: grab;
   -webkit-app-region: no-drag;
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
+  overflow: visible;
+}
+
+#pet svg {
+  width: var(--pet-draw);
+  height: var(--pet-draw);
+  display: block;
+  pointer-events: none;
+  overflow: visible;
+  flex-shrink: 0;
 }
 
 body.dragging #pet {
@@ -84,7 +94,7 @@ body.dragging #pet {
 }
 
 #speech-text {
-  font-size: 11px;
+  font-size: var(--bubble-font);
   line-height: 1.35;
   color: #222;
   font-weight: 700;
