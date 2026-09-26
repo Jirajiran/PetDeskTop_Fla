@@ -15,6 +15,12 @@ const LOAD_THRESHOLD = 90;
 /** Must stay over threshold continuously this long; any dip resets the timer. */
 const LOAD_SUSTAIN_MS = 15000;
 const APP_CATCH_DEBOUNCE_MS = 45000;
+/** Other desktop-pet notice — longer than tab catch (2–5 min band). */
+const OTHER_PET_DEBOUNCE_MS = 3 * 60 * 1000;
+const OTHER_PET_FAMILY = 'other-pet';
+/** Prefer small floating windows (many Steam pets). */
+const OTHER_PET_MAX_AREA = 400 * 400;
+const OTHER_PET_MAX_SIDE = 480;
 const PORN_DEBOUNCE_MS = 8000;
 const BAN_FILE = 'awareness-ban.json';
 
@@ -141,15 +147,27 @@ let getMainWindow = null;
 let onForceQuit = null;
 /** @type {null | (() => boolean)} */
 let isShowSpeechActive = null;
+/** @type {null | (() => boolean)} true while soft-hidden — block soft app-catch speak */
+let isPetVisuallyHidden = null;
 /** @type {null | (() => void)} Called when awareness owns stage — main drops external pending. */
 let onExternalRefuseNeeded = null;
 let pollTimer = null;
 let polling = false;
 let speakingBusy = false;
+/** True while the active speak is porn/load-quit (thenQuit or keepPriority). Soft app-catch leaves this false. */
+let speakCritical = false;
 /** @type {{ text: string, thenQuit: boolean }[]} */
 let speakQueue = [];
 let speakSafetyTimer = null;
 let pornSequenceActive = false;
+/**
+ * Soft app-catch / other-pet intent (shared slot). Not spoken until pet idle-ready.
+ * Porn / load-quit still use requestSpeak immediately.
+ * other-pet may include lookTarget (screen cx/cy); tab catch leaves it null.
+ * Coexistence: app-catch may overwrite other-pet; other-pet does not steal a tab-catch slot.
+ * @type {null | { text: string, family: string, at: number, lookTarget?: { cx: number, cy: number }|null }}
+ */
+let pendingAppCatch = null;
 /** @type {BanState} */
 let state = { ...DEFAULT_STATE };
 /** Wall-clock when heaviest process first crossed LOAD_THRESHOLD without dipping; null = not hot. */
@@ -168,6 +186,15 @@ function logAwareness(context, err) {
 function showSpeechBlocksGeneral() {
   try {
     return typeof isShowSpeechActive === 'function' && !!isShowSpeechActive();
+  } catch (_) {
+    return false;
+  }
+}
+
+/** Soft-hidden (tray Hide / snooze) — soft app-catch must wait until Show. */
+function isPetSoftHidden() {
+  try {
+    return typeof isPetVisuallyHidden === 'function' && !!isPetVisuallyHidden();
   } catch (_) {
     return false;
   }
@@ -284,6 +311,12 @@ function enqueueSpeakSequence(items) {
 }
 
 function requestSpeak(text, thenQuit, opts = {}) {
+  const critical = !!thenQuit || !!opts.keepPriority;
+  // Soft app-catch must not speak while soft-hidden — pending waits until Show.
+  if (!critical && isPetSoftHidden()) {
+    return;
+  }
+
   if (speakingBusy) {
     // Critical quit while busy: schedule fallback quit only.
     if (thenQuit) {
@@ -293,16 +326,23 @@ function requestSpeak(text, thenQuit, opts = {}) {
   }
 
   speakingBusy = true;
+  speakCritical = critical;
   notifyExternalRefuse();
   clearSpeakSafetyTimer();
   const keepPriority = !!opts.keepPriority;
+  const look = opts.lookTarget && Number.isFinite(opts.lookTarget.cx) && Number.isFinite(opts.lookTarget.cy)
+    ? { lookCx: Number(opts.lookTarget.cx), lookCy: Number(opts.lookTarget.cy) }
+    : {};
   const ok = sendToRenderer('awareness-speak', {
     text,
     thenQuit: !!thenQuit,
     keepPriority,
+    family: opts.family ? String(opts.family) : undefined,
+    ...look,
   });
   if (!ok) {
     speakingBusy = false;
+    speakCritical = false;
     if (thenQuit) {
       speakQueue = [];
       pornSequenceActive = false;
@@ -321,6 +361,7 @@ function requestSpeak(text, thenQuit, opts = {}) {
     speakSafetyTimer = null;
     if (!speakingBusy) return;
     speakingBusy = false;
+    speakCritical = false;
     if (thenQuit) {
       speakQueue = [];
       pornSequenceActive = false;
@@ -391,7 +432,8 @@ function runPowerShell(script) {
 /**
  * Snapshot of visible windows + rough CPU/memory load.
  * Uses a short dual-sample on top WorkingSet processes (Task Manager–style %).
- * @returns {Promise<{windows: Array<{pid:number,name:string,title:string}>, heaviest: {pid:number,name:string,cpu:number,mem:number}|null}>}
+ * Each window includes MainWindow bounds center (cx/cy screen) for other-pet look.
+ * @returns {Promise<{windows: Array<{pid:number,name:string,title:string,cx:number,cy:number,width:number,height:number,topMost:boolean,path:string}>, heaviest: {pid:number,name:string,cpu:number,mem:number}|null}>}
  */
 async function snapshotWindows() {
   if (process.platform !== 'win32') {
@@ -405,6 +447,21 @@ $ErrorActionPreference = 'SilentlyContinue'
 $cores = ${cores}
 $selfRoot = ${selfPid}
 
+if (-not ('FlaPetNativeWin' -as [type])) {
+  Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class FlaPetNativeWin {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+  public const int GWL_EXSTYLE = -20;
+  public const int WS_EX_TOPMOST = 0x00000008;
+}
+"@
+}
+
 $totalMem = [double](Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
 if ($totalMem -le 0) { $totalMem = 1 }
 
@@ -412,10 +469,33 @@ $wins = @()
 Get-Process | Where-Object {
   $_.Id -ne $selfRoot -and $_.MainWindowTitle -and $_.MainWindowTitle.Trim() -ne ''
 } | ForEach-Object {
+  $cx = 0; $cy = 0; $w = 0; $h = 0; $topMost = $false
+  try {
+    $hwnd = $_.MainWindowHandle
+    if ($hwnd -ne [IntPtr]::Zero) {
+      $rect = New-Object FlaPetNativeWin+RECT
+      if ([FlaPetNativeWin]::GetWindowRect($hwnd, [ref]$rect)) {
+        $w = [int]($rect.Right - $rect.Left)
+        $h = [int]($rect.Bottom - $rect.Top)
+        $cx = [math]::Round(($rect.Left + $rect.Right) / 2.0)
+        $cy = [math]::Round(($rect.Top + $rect.Bottom) / 2.0)
+      }
+      $ex = [FlaPetNativeWin]::GetWindowLong($hwnd, [FlaPetNativeWin]::GWL_EXSTYLE)
+      $topMost = ($ex -band [FlaPetNativeWin]::WS_EX_TOPMOST) -ne 0
+    }
+  } catch {}
+  $path = ''
+  try { $path = [string]$_.Path } catch { $path = '' }
   $wins += [pscustomobject]@{
     pid = $_.Id
     name = $_.ProcessName
     title = $_.MainWindowTitle
+    cx = $cx
+    cy = $cy
+    width = $w
+    height = $h
+    topMost = $topMost
+    path = $path
   }
 }
 
@@ -463,6 +543,12 @@ foreach ($p in $candidates) {
       pid: Number(w.pid) || 0,
       name: String(w.name || ''),
       title: String(w.title || ''),
+      cx: Number(w.cx) || 0,
+      cy: Number(w.cy) || 0,
+      width: Number(w.width) || 0,
+      height: Number(w.height) || 0,
+      topMost: !!w.topMost,
+      path: String(w.path || ''),
     }));
     let heaviest = data.heaviest || null;
     if (heaviest) {
@@ -507,6 +593,87 @@ function matchAppCatch(windows, selfPids) {
     }
   }
   return null;
+}
+
+/** Known big apps / shells — not "mystery desktop pets". */
+const OTHER_PET_DENY_NAMES = [
+  'explorer', 'applicationframehost', 'systemsettings', 'searchapp', 'searchui',
+  'shellexperiencehost', 'startmenuexperiencehost', 'textinputhost',
+  'runtimebroker', 'lockapp', 'securityhealthsystray',
+  'winword', 'excel', 'powerpnt', 'outlook', 'onenote', 'mspub', 'msaccess',
+  'slack', 'teams', 'ms-teams', 'zoom', 'skype', 'webex',
+  'taskmgr', 'cmd', 'powershell', 'pwsh', 'windowsterminal', 'conhost',
+  'notepad', 'calc', 'calculator', 'snip', 'screenclipping',
+  'devenv', 'cursor', 'idea64', 'pycharm64', 'rider64', 'webstorm64',
+  'firefox', 'opera', 'brave', 'vivaldi',
+  'nvidia', 'nvcontainer', 'amdow', 'radeon',
+  'wallpaperengine', 'wallpaper engine', 'rainmeter',
+  'spotify', 'discord', 'steam', 'steamwebhelper',
+  'chrome', 'msedge',
+];
+
+function isDeniedForOtherPet(title, name) {
+  const t = String(title || '');
+  const n = String(name || '');
+  for (const rule of APP_CATCH_RULES) {
+    try {
+      if (rule.test(t, n)) return true;
+    } catch (_) { /* ignore */ }
+  }
+  const hay = `${t} ${n}`.toLowerCase();
+  for (const d of OTHER_PET_DENY_NAMES) {
+    if (hay.includes(d)) return true;
+  }
+  if (/microsoft (word|excel|powerpoint|edge|teams|outlook)/i.test(hay)) return true;
+  return false;
+}
+
+function isPetLikeWindow(w) {
+  const width = Number(w.width) || 0;
+  const height = Number(w.height) || 0;
+  if (width < 48 || height < 48) return false;
+  // Fullscreen / large app chrome — not a floating pet.
+  if (width > 1100 || height > 900) return false;
+  const area = width * height;
+  const small = area <= OTHER_PET_MAX_AREA
+    || (width <= OTHER_PET_MAX_SIDE && height <= OTHER_PET_MAX_SIDE);
+  const topMost = !!w.topMost;
+  if (topMost && width <= 800 && height <= 800) return true;
+  if (small) return true;
+  // Optional Steam install hint for mid-size always-floating pets.
+  if (w.path && /steamapps/i.test(w.path) && width <= 640 && height <= 640) return true;
+  return false;
+}
+
+/**
+ * Heuristic "other desktop pet" — no species/name greeting.
+ * Denylist + prefer small / topmost; exclude self.
+ */
+function matchOtherPet(windows, selfPids) {
+  const phrases = i18n.appPhrases(OTHER_PET_FAMILY);
+  if (!phrases.length) return null;
+
+  let best = null;
+  let bestScore = -1;
+  for (const w of windows) {
+    if (isSelfProcess(w, selfPids)) continue;
+    if (isDeniedForOtherPet(w.title, w.name)) continue;
+    if (!isPetLikeWindow(w)) continue;
+    if (!Number.isFinite(w.cx) || !Number.isFinite(w.cy)) continue;
+    if (w.cx === 0 && w.cy === 0 && !(w.width > 0 && w.height > 0)) continue;
+
+    let score = 0;
+    if (w.topMost) score += 50;
+    const area = (Number(w.width) || 0) * (Number(w.height) || 0);
+    score += Math.max(0, 40 - Math.floor(area / 5000));
+    if (w.path && /steamapps/i.test(w.path)) score += 20;
+    if (score > bestScore) {
+      bestScore = score;
+      best = w;
+    }
+  }
+  if (!best) return null;
+  return { family: OTHER_PET_FAMILY, phrases, window: best };
 }
 
 function enforceBanKick() {
@@ -639,15 +806,110 @@ function handleSystemLoad(heaviest, selfPids) {
 }
 
 function handleAppCatch(windows, selfPids) {
-  if (speakingBusy || pornSequenceActive || state.banActive) return;
-  if (showSpeechBlocksGeneral()) return;
+  if (pornSequenceActive || state.banActive) return;
   const hit = matchAppCatch(windows, selfPids);
   if (!hit) return;
+
+  const text = pickPhrase(hit.phrases);
+  if (!text) return;
+
   const now = Date.now();
+
+  // Slot already waiting — always overwrite (latest wins); debounce only after delivery.
+  if (pendingAppCatch) {
+    pendingAppCatch = {
+      text: String(text),
+      family: hit.family,
+      at: now,
+      lookTarget: null,
+    };
+    sendToRenderer('awareness-pending', { family: hit.family });
+    return;
+  }
+
   const last = lastAppCatchAt.get(hit.family) || 0;
   if (now - last < APP_CATCH_DEBOUNCE_MS) return;
-  lastAppCatchAt.set(hit.family, now);
-  requestSpeak(pickPhrase(hit.phrases), false);
+
+  // Central API slot — do not seize / speak yet; pet delivers when idle.
+  pendingAppCatch = {
+    text: String(text),
+    family: hit.family,
+    at: now,
+    lookTarget: null,
+  };
+  sendToRenderer('awareness-pending', { family: hit.family });
+}
+
+/**
+ * Soft other-pet notice — same pendingAppCatch slot + idle deliver.
+ * Does not steal a waiting tab-catch; longer debounce than APP_CATCH.
+ */
+function handleOtherPetCatch(windows, selfPids) {
+  if (pornSequenceActive || state.banActive) return;
+  const hit = matchOtherPet(windows, selfPids);
+  if (!hit) return;
+
+  const text = pickPhrase(hit.phrases);
+  if (!text) return;
+
+  const win = hit.window || {};
+  const lookTarget = {
+    cx: Number(win.cx) || 0,
+    cy: Number(win.cy) || 0,
+  };
+  const now = Date.now();
+
+  // Do not steal a waiting known-app catch (tab / discord / etc.).
+  if (pendingAppCatch && pendingAppCatch.family !== OTHER_PET_FAMILY) {
+    return;
+  }
+
+  if (pendingAppCatch) {
+    pendingAppCatch = {
+      text: String(text),
+      family: OTHER_PET_FAMILY,
+      at: now,
+      lookTarget,
+    };
+    sendToRenderer('awareness-pending', { family: OTHER_PET_FAMILY });
+    return;
+  }
+
+  const last = lastAppCatchAt.get(OTHER_PET_FAMILY) || 0;
+  if (now - last < OTHER_PET_DEBOUNCE_MS) return;
+
+  pendingAppCatch = {
+    text: String(text),
+    family: OTHER_PET_FAMILY,
+    at: now,
+    lookTarget,
+  };
+  sendToRenderer('awareness-pending', { family: OTHER_PET_FAMILY });
+}
+
+/**
+ * Pet finished waiting for a good stage — deliver soft app-catch once.
+ * @returns {'started'|'busy'|'empty'}
+ */
+function deliverPendingAppCatch() {
+  if (!pendingAppCatch) return 'empty';
+  if (speakingBusy || pornSequenceActive) return 'busy';
+  if (showSpeechBlocksGeneral()) return 'busy';
+  // After tray Hide / snooze — keep pending until Show (do not clear slot).
+  if (isPetSoftHidden()) return 'busy';
+
+  const job = pendingAppCatch;
+  pendingAppCatch = null;
+  lastAppCatchAt.set(job.family, Date.now());
+  requestSpeak(job.text, false, {
+    family: job.family,
+    lookTarget: job.lookTarget || null,
+  });
+  return 'started';
+}
+
+function clearPendingAppCatch() {
+  pendingAppCatch = null;
 }
 
 async function pollOnce() {
@@ -695,8 +957,11 @@ async function pollOnce() {
       handleSystemLoad(heaviest, selfPids);
     }
 
-    if (!speakingBusy && !state.banActive) {
+    // Soft app-catch: only refresh pending slot (pet delivers when idle).
+    if (!state.banActive) {
       handleAppCatch(snap.windows, selfPids);
+      // Other desktop-pet notice — same soft slot; longer debounce; no steal of tab-catch.
+      handleOtherPetCatch(snap.windows, selfPids);
     }
   } catch (err) {
     logAwareness('pollOnce', err);
@@ -787,6 +1052,7 @@ function stopPolling() {
  * @param {() => import('electron').BrowserWindow|null} opts.getMainWindow
  * @param {() => void} opts.forceQuit
  * @param {() => boolean} [opts.isShowSpeechActive] true while soft-show intro runs
+ * @param {() => boolean} [opts.isPetVisuallyHidden] true while soft-hidden — block soft catch
  * @param {() => void} [opts.onExternalRefuseNeeded] drop tray pending when awareness owns stage
  */
 function init(opts) {
@@ -795,6 +1061,9 @@ function init(opts) {
   onForceQuit = opts.forceQuit;
   isShowSpeechActive = typeof opts.isShowSpeechActive === 'function'
     ? opts.isShowSpeechActive
+    : null;
+  isPetVisuallyHidden = typeof opts.isPetVisuallyHidden === 'function'
+    ? opts.isPetVisuallyHidden
     : null;
   onExternalRefuseNeeded = typeof opts.onExternalRefuseNeeded === 'function'
     ? opts.onExternalRefuseNeeded
@@ -832,6 +1101,7 @@ function getState() {
 function notifySpeechFinished(thenQuit) {
   clearSpeakSafetyTimer();
   speakingBusy = false;
+  speakCritical = false;
   if (thenQuit) {
     speakQueue = [];
     pornSequenceActive = false;
@@ -849,12 +1119,19 @@ function resetGeneralSpeakLock() {
   if (pornSequenceActive) return;
   clearSpeakSafetyTimer();
   speakingBusy = false;
+  speakCritical = false;
   speakQueue = [];
+  // Soft pending stays — pet will deliver when idle after tray pipe.
 }
 
-/** External tray gate: awareness owns stage (same protect class as Show intro). */
+/** External tray gate: awareness owns stage (speaking / porn). Pending soft catch does not block. */
 function isAwarenessStageActive() {
   return speakingBusy || pornSequenceActive || speakQueue.length > 0;
+}
+
+/** Porn chain / load-quit — tray Hide must refuse. Soft app-catch is not critical. */
+function isCriticalAwarenessActive() {
+  return pornSequenceActive || (speakingBusy && speakCritical);
 }
 
 module.exports = {
@@ -870,6 +1147,9 @@ module.exports = {
   notifySpeechFinished,
   resetGeneralSpeakLock,
   isAwarenessStageActive,
+  isCriticalAwarenessActive,
+  deliverPendingAppCatch,
+  clearPendingAppCatch,
   setLocale,
   GRACE_MS,
   LOAD_THRESHOLD,

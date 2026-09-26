@@ -15,21 +15,25 @@ Desktop pet (Electron). แก้บัคหรือเพิ่มฟีเ�
 คำสั่งจาก **Windows system tray และทุกทางที่เทียบเท่า** (แสดง / ซ่อน / Size / ภาษา / snooze wake / second-instance / IPC เดียวกัน):
 
 - **Size / ภาษา** = จำดิสก์ → `app.relaunch()` → `app.exit(0)` (ค่าเท่าเดิม = no-op) — **ไม่ใช้ท่อ soft** (ยอมแพ้ soft เพราะรั่ว stage ไล่ไม่หมด; ผู้ใช้เปลี่ยนไม่บ่อย)
-- **แสดง / ซ่อน** = ท่อ soft ผ่าน `enqueueTrayOp` + Hybrid ตาม Stage:
-  - **Show แนะนำตัว** หรือ **Awareness** → **ไม่รับค่าเลย** (ไม่ enqueue)
-  - **Stage อื่น** → หักดิบได้ แล้วคิว latest-wins → Apply
-  - **shellBusy mid-apply** → คิวรอ `endShellOp` แล้ว prepare
+  - **แสดง / ซ่อน** = ท่อ soft ผ่าน `enqueueTrayOp` + Hybrid ตาม Stage:
+    - **Show/Hide ถือ `shellBusy` ตั้งแต่ก่อน prepare** (exclusive) — กัน caption blink / soft awareness แทรกช่อง settle
+    - **Show แนะนำตัว** หรือ **Awareness** → **ไม่รับค่าเลย** สำหรับ show/size/locale (ไม่ enqueue)
+    - **Tray Hide** = settle เหมือน Snooze (`enterSnoozeSettlePath`) → leave 1 บรรทัด → despawn tween → soft-hide; **refuse เฉพาะโป๊/critical**
+    - **Stage อื่น** → หักดิบได้ แล้วคิว latest-wins → Apply
+    - **shellBusy mid-apply** → คิวรอ `endShellOp` แล้ว prepare
 - **ภายใน pet** (พูด→คลิก→Snooze) เปลี่ยน stage กันเองได้
 - **รีสตาร์ท** = ปุ่ม Tray หรืออัตโนมัติหลัง Size/ภาษา — `relaunch` อย่างเดียวไม่พอ ต้อง `exit` ด้วย
 - ระหว่าง `shellBusy` (show/hide): **ไม่เปิดเมนูถาด**; Show/Awareness เปิดเมนูได้เพื่อเลือก Size/ภาษา (แล้ว relaunch)
 - เมนูถาด = **เปิดได้ครั้งเดียว** (`trayMenuOpen` + `popUpContextMenu`)
 - **คลิกขวาไอคอนถาด** = เปิด/ปิด panel อย่างเดียว — ห้ามแตะ pet pipe; ค่า Size/ภาษาส่งตอนกด MenuItem แล้ว relaunch
-- หลังปิดเมนูถาด = **soft hide→show ภาพ** (`scheduleCaptionSoftHideShow`) เมื่อปลอดภัย — เคลียร์ caption; ไม่ IPC visibility / ไม่บท Show; ไม่ปลอดภัย = strip title อย่างเดียว
+- หลังปิดเมนูถาด = **soft hide→show ภาพ 2 รอบ** (`scheduleCaptionSoftHideShow`: pass 1 ~80ms + pass 2 ~3s) เมื่อปลอดภัย — เคลียร์ caption; ไม่ IPC visibility / ไม่บท Show; ไม่ปลอดภัย = strip title อย่างเดียว; ยกเลิก pass 2 ถ้า shellBusy / protected / really hidden
 - focus/blur = caption only; heavy reassert เฉพาะ show/restore/minimize และข้ามตอน `shellBusy`
-- ลำดับ awareness: **โป๊ (สูงสุด)** → **Show แนะนำตัว** → other
+- ลำดับ: **โป๊ / critical awareness (สูงสุด)** → **Snooze / tray Hide-with-leave (ชั้น 2)** → **Show แนะนำตัว / soft app-catch** → other
+- **Snooze** ยกเลิก Show / soft awareness ที่กำลังเล่นได้ — Show นับว่าเสร็จ (ไม่ไล่หมวดที่เหลือ) แล้ว soft-hide ทันที (ไม่ leave); โป๊/load-quit ตัดไม่ได้
+- **Tray Hide** = settle เหมือน Snooze → leave (i18n last category 1 บรรทัด) → despawn `#pet` → soft-hide; Snooze ไม่ใช้ leave (soft-hide ทันที)
 - Boot: awareness หลัง show shell ปิดครั้งแรก
 - ห้าม invent `shellBusyOwner`/awareness reclaim ที่ตัด `shell-ready` ตอน boot
-- ขั้นต่ำ ~700ms / สูงสุดมี timeout — อย่าปลด busy ก่อนท่อ settle
+- ขั้นต่ำ ~700ms / สูงสุดมี timeout — hide-leave ใช้ max ยาวขึ้น (~45s); อย่าปลด busy ก่อนท่อ settle
 - เข้าท่อ show/hide ด้วย `beginShellOp` → settle ภาพ → `shell-ready` → `endShellOp`
 
 ## 2. ท่อเดียวกัน (pipeline / OOP stage)
@@ -42,7 +46,12 @@ Desktop pet (Electron). แก้บัคหรือเพิ่มฟีเ�
 - **Always-on-top = boot-only** — ห้ามสลับตอน show/hide/drag (ดึงแอปอื่นบน Windows)
 - Size / locale เท่าเดิม: no-op — ไม่ relaunch ฟรี
 - Show จาก tray: ห้ามยิง `notifyPetSize` ซ้ำจนฆ่าท่อพูด
-- **ห้ามหักดิบ Show / Awareness** จากภายนอกตอน show/hide; Stage other หักได้ตอน prepare
+- **ห้ามหักดิบ Show / Awareness** จากภายนอกตอน show/hide ทั่วไป; **Tray Hide** หัก Show/soft ได้; Stage other หักได้ตอน prepare
+- **Spawn tween** = CSS บน `#pet` เท่านั้น **0.3s** (show: 0.1→1.2→1; hide: 1→1.2→0.1 + rotate) — ถึงปลายแล้วไปต่อทันที; **ห้าม** เปลี่ยน Size/window geometry ระหว่าง tween
+- Show: soft-show → spawn → งานต่อเมื่อถึง 1 → Show categories
+- Hide (tray): คิว → settle เหมือน Snooze → ลา 1.5s (speak cap `maxMs`, ไม่ใช้ speechDuration 6s) → despawn tween 0.3s → soft-hide (main clock `pet-hide-seq`; **ไม่มีธง arm**); Snooze = soft-hide ทันที; **อย่าตัด SFX** (sfxHide/Snooze.wav เล่นต่อได้)
+- ลาก: ระหว่างกดค้าง **ห้าม** mouse-forward; อัปเดตเป้าจากเมาส์จนปล่อย
+- ชิดขอบ: clamp เฉพาะ pet footprint; `TRIGGER_DEPTH_PX` = 10; `BASE_DEADZONE_PX` = 0
 
 `visibilityGen` คือรุ่นท่อ — ท่อใหม่ฆ่าของเก่า; early-return ต้อง `shell-ready` ด้วยถ้าเคย `beginShellOp`
 
@@ -52,6 +61,7 @@ Desktop pet (Electron). แก้บัคหรือเพิ่มฟีเ�
 - `categories` เรียงลำดับ — ระบบ**ไม่รู้**ว่าอะไรคือทักทาย/คุย; รู้แค่ว่าเรียงกัน
 - **Show** = ทุกหมวดยกเว้นตัวสุดท้าย
 - **Awareness** = ทั้งแถว; **หมวดสุดท้าย = ลา + thenQuit** เสมอ
+- **Tray Hide leave** = หยิบ 1 ประโยคจากหมวดสุดท้าย (`leavePhrases`) แล้วค่อย soft-hide
 - ขยายรอบ = แก้ JSON ไม่ hardcode จำนวนรอบใน logic
 - **เปลี่ยนภาษา / Size** = เคสปิด (locale th|en|zh, Size 1..8) + จำดิสก์ + relaunch
 
@@ -59,18 +69,28 @@ Desktop pet (Electron). แก้บัคหรือเพิ่มฟีเ�
 
 - สำคัญสูงเมื่อเข้า stage: บังคับพูดครบคิว แม้ซ่อน / เดิน / ลาก
 - พูดแบบ `force` — ห้าม `startSpeaking` ธรรมดาที่ติด `isDragFrozen` แล้ว skip รอบ
+- **App-catch (ลูกเล่น)** = ค่าเข้า API กลาง (`pendingAppCatch` latest wins) → Pet รับรู้ → **รอ idle** → ค่อย `awarenessIdleReady` / speak — ห้าม seize ทันทีตอนเปิดแท็บ
+- **Other-pet (soft)** = ครอบครัว `other-pet` ใน slot เดียวกัน; debounce ~3 นาที; ส่ง `lookCx/lookCy` → pet มองศูนย์หน้าต่าง ~30s ไม่เดิน; จบด้วย Snooze หรือ timeout; ไม่ขโมย pending แท็บ (app-catch ทับ other-pet ได้)
+- **โป๊ / โหลดลา+quit** = ยัง force พูดได้ทันทีตามสเปก
 - โป๊/แบน: session แรกไล่คิวหมวดแล้ว quit; `reopenCount` +1 ต่อเปิดแอปหลังแบน ไม่ใช่ต่อปิดแท็บระหว่างพูด
 - ≥4: พูดคลังลาแล้วปิด — ห้ามเงียบปิดโดยไม่พูด (ทดสอบต้องเห็น)
-- External แสดง/ซ่อน ตอน awareness = **refuse**; Size/ภาษา = relaunch (state ใหม่สะอาด)
+- External แสดงตอน awareness **กำลังพูด** = **refuse**; Hide ตัดได้เฉพาะ soft; Size/ภาษา = relaunch; soft pending ไม่บล็อกถาด
+- **Soft-hidden** (`petVisuallyHidden`): soft app-catch ไม่พูด / ไม่ deliver — ค้าง pending จน Show; โป๊/load-quit ยัง force ได้
 - อย่ารวม awareness เข้า `shellBusy` แบบ owner/reclaim จนกว่าจะออกแบบไม่ชนท่อ show ตอน boot
 
 ## 5. Pet input / motion
 
-- ลาก = ค้าง `fade1`; กดค้างตามเมาส์แม้ติดขอบ (clamp ตำแหน่ง ไม่หยุด loop)
+- ลาก = ค้าง `fade1`; กดค้างตามเมาส์จนกว่าจะปล่อย — `unlockPetInput` / pointerenter **ห้าม** ฆ่า drag session
+- Watchdog pointer session = ปลดเฉพาะเมื่อไม่มี drag activity นาน (ไม่ฆ่าลากยาวที่ยังตามเมาส์)
 - คลิก/ลากตอนเดิน = เคลียร์ `walkTarget` → idle → บ่นตอนปล่อย
 - Flee ตัดสินใจเมาส์: `MOUSE_FLEE_CHECK_MS` ตามค่าในโค้ด (ปัจจุบัน 100)
 - วาร์ป/เดิน: `MoveMent.wav` ตามที่ผูกไว้
+- ชิดขอบ: `BASE_DEADZONE_PX = 0`; clamp เฉพาะ footprint; warp `TRIGGER_DEPTH_PX` = 10
+- ลากตามเมาส์: `DRAG_SPEED_PX = 36`; กลางลากห้าม click-through; sample cursor อัปเดตเป้าตลอดที่กดค้าง
 - **Lock** = อยู่กับที่ (ปิด AI pathing); ลากได้ — snooze ใช้ multi-tap เดียวกับ unlock (ห้ามคลิกเดียวแล้วซ่อน)
+- **Snooze (ชั้น 2)** = ตัด Show / พูด soft / เดิน ได้; บล็อก pointer เฉพาะ `shellBusy` กับ `awarenessCriticalActive` (โป๊/load-quit)
+- **Bubble click-through** = นอก `#pet` ใช้ `setIgnoreMouseEvents(true, { forward: true })`; ชี้ `#pet` = accept; soft-hide = full ignore (ไม่มี forward) — ห้าม invent ท่อ mouse คู่ขนานที่ชน soft-hide
+- Re / watchdog ฟื้นค้าง: ใช้ `moveTop` ดัน z-order — **ห้าม** สลับ `alwaysOnTop` (boot-only)
 
 ## 6. ไฟล์หลัก
 
@@ -81,6 +101,7 @@ Desktop pet (Electron). แก้บัคหรือเพิ่มฟีเ�
 | App awareness | `source/awareness.js` |
 | Locale | `source/i18n.js`, `source/i18n/*.json` |
 | Preload IPC | `source/preload.js` |
+| Pet / bubble CSS | `source/style.css` |
 
 รันทดสอบจาก `source/` ด้วย `npm start`. อย่า commit Setup `.exe` โดยไม่ถาม.
 
@@ -88,6 +109,7 @@ Desktop pet (Electron). แก้บัคหรือเพิ่มฟีเ�
 
 - Size/ภาษา: จำค่า → รีสตาร์ทแอป → ค่าใหม่หลัง boot
 - ค่า Size/ภาษาเท่าเดิม: ไม่ relaunch
-- ซ่อน↔แสดง soft ยังได้ Show ตามหมวด i18n
+- ซ่อน↔แสดง soft ยังได้ Show ตามหมวด i18n; Hide มี leave + despawn; Show มี spawn
 - Awareness ยังพูดครบคิวแล้ว quit ตามสเปก
+- Bubble คลิกทะลุ desktop; `#pet` ลากได้; soft-hide ไม่รับคลิก
 - ไม่แตะ alwaysOnTop นอก boot

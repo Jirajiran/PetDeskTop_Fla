@@ -21,13 +21,19 @@ contextBridge.exposeInMainWorld('petAPI', {
   quitApp: () => ipcRenderer.invoke('quit-app'),
   snooze: (ms) => ipcRenderer.invoke('snooze', ms),
   restoreWindowShell: () => ipcRenderer.invoke('restore-window-shell'),
+  raisePetZOrder: () => ipcRenderer.invoke('raise-pet-z-order'),
   awarenessSpeechDone: (thenQuit) => ipcRenderer.invoke('awareness-speech-done', !!thenQuit),
+  awarenessIdleReady: () => ipcRenderer.invoke('awareness-idle-ready'),
+  awarenessPendingClear: () => ipcRenderer.invoke('awareness-pending-clear'),
   shellReady: (reason) => ipcRenderer.invoke('shell-ready', reason || ''),
   trayIdleReady: () => ipcRenderer.invoke('tray-idle-ready'),
   trayIdleReject: () => ipcRenderer.invoke('tray-idle-reject'),
   setShowSpeechGate: (active) => ipcRenderer.invoke('show-speech-gate', !!active),
   setAwarenessGate: (active) => ipcRenderer.invoke('awareness-gate', !!active),
   stageHardReset: () => ipcRenderer.invoke('stage-hard-reset'),
+  setIgnoreMouseForward: (ignore) => {
+    ipcRenderer.send('set-ignore-mouse-forward', !!ignore);
+  },
   onScreenChanged: (callback) => {
     ipcRenderer.on('screen-changed', () => callback());
   },
@@ -36,6 +42,9 @@ contextBridge.exposeInMainWorld('petAPI', {
   },
   onForceInput: (callback) => {
     ipcRenderer.on('pet-force-input', () => callback());
+  },
+  onHideSeq: (callback) => {
+    ipcRenderer.on('pet-hide-seq', (_event, payload) => callback(payload || {}));
   },
   onMovementLock: (callback) => {
     ipcRenderer.on('pet-movement-lock', (_event, locked) => callback(!!locked));
@@ -56,10 +65,13 @@ contextBridge.exposeInMainWorld('petAPI', {
     ipcRenderer.on('pet-shell-busy', (_event, busy) => callback(!!busy));
   },
   onTrayPrepare: (callback) => {
-    ipcRenderer.on('pet-tray-prepare', () => callback());
+    ipcRenderer.on('pet-tray-prepare', (_event, payload) => callback(payload || {}));
   },
   onAwarenessSpeak: (callback) => {
     ipcRenderer.on('awareness-speak', (_event, payload) => callback(payload || {}));
+  },
+  onAwarenessPending: (callback) => {
+    ipcRenderer.on('awareness-pending', (_event, payload) => callback(payload || {}));
   },
   onAwarenessForceQuit: (callback) => {
     ipcRenderer.on('awareness-force-quit', () => callback());

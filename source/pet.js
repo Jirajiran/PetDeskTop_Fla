@@ -62,7 +62,7 @@ const LOOK_DEADZONE_PX = 28; // baseline; runtime uses lookDeadzonePx
 const BASE_LOOK_DEADZONE_PX = 28;
 const SVG_PET_URL = 'PetPicture/PetDesignSVG.svg';
 const MIN_RHYTHM_BEATS = 8;
-const TRIGGER_DEPTH_PX = 16;
+const TRIGGER_DEPTH_PX = 10;
 const DEADZONE_PX = 12; // overwritten by applyPetSizeLevel; keep for any static refs
 const GRID_EDGE_FRAC = 0.15;
 const WARP_COOLDOWN_MS = 1000;
@@ -75,11 +75,22 @@ const WATCHDOG_MS = 5000;
 const SESSION_STUCK_MS = 8000;
 const ENDING_DRAG_STUCK_MS = 12000;
 const SPEAK_STUCK_MS = 20000;
+/** Renderer mirror of shellBusy — main max ~12s; force local unlock if sticky. */
+const SHELL_BUSY_STUCK_MS = 15000;
+/** Awareness priority / speak lock must not block AI forever. */
+const AWARENESS_PRIORITY_STUCK_MS = 90000;
+/** Soft-show intro gate stuck (multi-line) — clear so tray/AI recover. */
+const SHOW_SPEECH_STUCK_MS = 90000;
+/** Feature gate should open in FEATURE_READY_MS; nudge if stuck closed. */
+const FEATURE_GATE_STUCK_MS = 5000;
+/** Absolute max mouse-sleep pose if wake path never runs. */
+const MOUSE_SLEEP_STUCK_MS = 600000;
 const MOUSE_SLEEP_MS = 180000;
 const MOUSE_POLL_MS = 500;
 /** Size 1 baseline near-radius (after ×2 flee tweak). */
 const BASE_MOUSE_NEAR_PX = 240;
-const BASE_DEADZONE_PX = 12;
+/** Edge clamp inset — 0 = flush to work-area edges (warp trigger stays separate). */
+const BASE_DEADZONE_PX = 0;
 const BASE_SNOOZE_TAPS = 25;
 /** Flee side checks at most this often — not every MOVE_TICK_MS (pet walk alone must not retarget). */
 const MOUSE_FLEE_CHECK_MS = 100;
@@ -91,27 +102,42 @@ const FEATURE_READY_MS = 450;
 const BASE_WIN_PET = 72;
 const BASE_WIN_W = 88;
 const BASE_WIN_SPEAK_H = 120;
-/** Constant px/frame toward mouse while dragging / settling after release (×2). */
-const DRAG_SPEED_PX = 12;
+/** Constant px/frame toward mouse while dragging / settling after release (×3 from prior 12). */
+const DRAG_SPEED_PX = 36;
+/** Show/Hide spawn tween duration (CSS pet-spawn / pet-despawn) — 0.3s step timeline. */
+const PET_SPAWN_TWEEN_MS = 300;
+/** Soft other-pet notice: look at window center this long (ends on Snooze too). */
+const OTHER_PET_LOOK_MS = 30000;
 
 /** Runtime locale pack from main (i18n JSON). Categories are ordered logline beats. */
 let localePack = {
   locale: 'th',
   showCategories: [],
+  leavePhrases: [],
   pools: { idle: [], drag: [] },
 };
 /** Main tray/IPC loading lock mirror — clear clicks while shell settles. */
 let shellBusyActive = false;
+let shellBusySince = 0;
 /** Soft-show intro running — Tray rejects; general awareness blocked in main. */
 let showSpeechActiveLocal = false;
+let showSpeechSince = 0;
 /** Invalidates in-flight Show finally so it cannot clear a newer gate / leave gate stuck. */
 let showSpeechGateGen = 0;
+/** Cursor over #pet — mouse forward click-through when false. */
+let mouseOverPet = false;
+
+/** Leave line during hide — capped speak; main moves to despawn at 1.5s. */
+const HIDE_LEAVE_SPEAK_MS = 1500;
+/** Tray Hide already started Snooze.wav at despawn tween — skip replay in pausePet. */
+let hideSfxStartedAtDespawn = false;
 
 function applyLocalePack(pack) {
   if (!pack || typeof pack !== 'object') return;
   localePack = {
     locale: pack.locale || 'th',
     showCategories: Array.isArray(pack.showCategories) ? pack.showCategories : [],
+    leavePhrases: Array.isArray(pack.leavePhrases) ? pack.leavePhrases : [],
     pools: {
       idle: Array.isArray(pack.pools?.idle) ? pack.pools.idle : [],
       drag: Array.isArray(pack.pools?.drag) ? pack.pools.drag : [],
@@ -153,6 +179,8 @@ async function clearClicksForShellBusy() {
 
 /**
  * Stage Snooze path → idle (no hide). Mouse snooze only — cuts other stages.
+ * Priority: โป๊/critical awareness > Snooze > Show / soft awareness / other.
+ * Snooze aborts Show as "done" (no remaining categories) and soft awareness cleanly.
  */
 async function enterSnoozeSettlePath() {
   snoozeTapCount = 0;
@@ -163,6 +191,13 @@ async function enterSnoozeSettlePath() {
   lastDirection = null;
   mouseFleeDidFlee = false;
   mouseFleePendingSide = null;
+  clearOtherPetLook();
+
+  // Show intro: cancel = finished (do not resume remaining categories).
+  await finishShowSpeechAsDone('snooze');
+
+  // Soft awareness only — critical (porn / load-quit) never reaches here via pointer.
+  await abortSoftAwarenessForSnooze();
 
   if (isPointerSession || isDragFrozen || isActivelyDragging || isEndingDrag) {
     try {
@@ -181,6 +216,61 @@ async function enterSnoozeSettlePath() {
   resetSnoozeTaps();
 }
 
+/**
+ * Mark Show speech complete and drop the gate — remaining intro lines will not run.
+ * Bumps gate gen so in-flight maybeSpeakOnSoftShow exits without reclaiming the gate.
+ */
+async function finishShowSpeechAsDone(_reason = '') {
+  if (!showSpeechActiveLocal) return;
+  showSpeechGateGen += 1;
+  showSpeechActiveLocal = false;
+  showSpeechSince = 0;
+  try {
+    if (window.petAPI?.setShowSpeechGate) {
+      await window.petAPI.setShowSpeechGate(false);
+    }
+  } catch (err) {
+    logError('finishShowSpeechAsDone', err);
+  }
+}
+
+/**
+ * Soft app-catch / non-critical awareness: cancel speak + clear main speakingBusy.
+ * Does not touch porn / load-quit (awarenessCriticalActive).
+ */
+async function abortSoftAwarenessForSnooze() {
+  if (awarenessCriticalActive) return;
+  if (!awarenessPriorityActive && !awarenessSpeakLock) return;
+
+  speechGeneration += 1;
+  isSpeaking = false;
+  speakStartedAt = 0;
+  try {
+    stopVoice();
+    hideBubble();
+  } catch (_) { /* ignore */ }
+
+  awarenessSpeakLock = false;
+  awarenessPriorityActive = false;
+  awarenessPrioritySince = 0;
+  ++awarenessPriorityToken;
+
+  try {
+    if (window.petAPI?.setAwarenessGate) {
+      await window.petAPI.setAwarenessGate(false);
+    }
+  } catch (err) {
+    logError('abortSoftAwarenessForSnooze gate', err);
+  }
+  try {
+    if (window.petAPI?.awarenessSpeechDone) {
+      await window.petAPI.awarenessSpeechDone(false);
+    }
+  } catch (err) {
+    logError('abortSoftAwarenessForSnooze speechDone', err);
+  }
+}
+
 /** True when Stage other is clear — Tray may open its pipe. */
 function isPetTrulyIdle() {
   if (showSpeechActiveLocal) return false;
@@ -196,11 +286,35 @@ function isPetTrulyIdle() {
 
 /**
  * Hybrid tray prepare:
+ * - hide → same settle as Snooze (enterSnoozeSettlePath), then ready; leave+despawn run on apply
  * - Show / Awareness → refuse (no wait, no hard-cut of those stages)
  * - Stage other (walk / casual speak / drag) → hard-cut then ready
  */
-async function settleForTrayPrepare() {
+async function settleForTrayPrepare(payload = {}) {
+  const kind = payload && payload.kind ? String(payload.kind) : '';
   try {
+    if (kind === 'hide') {
+      if (awarenessCriticalActive) {
+        if (window.petAPI?.trayIdleReject) {
+          await window.petAPI.trayIdleReject();
+        }
+        return;
+      }
+      // Same path as mouse Snooze — cancel stages to idle; leave phrase runs after apply.
+      await enterSnoozeSettlePath();
+
+      if (awarenessCriticalActive) {
+        if (window.petAPI?.trayIdleReject) {
+          await window.petAPI.trayIdleReject();
+        }
+        return;
+      }
+      if (window.petAPI?.trayIdleReady) {
+        await window.petAPI.trayIdleReady();
+      }
+      return;
+    }
+
     if (showSpeechActiveLocal || awarenessPriorityActive || awarenessSpeakLock) {
       if (window.petAPI?.trayIdleReject) {
         await window.petAPI.trayIdleReject();
@@ -210,7 +324,6 @@ async function settleForTrayPrepare() {
 
     await hardCutGeneralStageForTray();
 
-    // Re-check: awareness/Show may have seized during cut.
     if (showSpeechActiveLocal || awarenessPriorityActive || awarenessSpeakLock) {
       if (window.petAPI?.trayIdleReject) {
         await window.petAPI.trayIdleReject();
@@ -235,10 +348,11 @@ async function settleForTrayPrepare() {
 
 /**
  * Hard-cut Stage other only (walk, casual speak, drag toys).
- * Never clears Show gate or awareness priority.
+ * Never clears Show gate or awareness priority (unless force after hide/snooze cut).
  */
-async function hardCutGeneralStageForTray() {
-  if (showSpeechActiveLocal || awarenessPriorityActive || awarenessSpeakLock) return;
+async function hardCutGeneralStageForTray(opts = {}) {
+  const force = !!opts.force;
+  if (!force && (showSpeechActiveLocal || awarenessPriorityActive || awarenessSpeakLock)) return;
 
   walkTarget = null;
   lastDirection = null;
@@ -246,6 +360,7 @@ async function hardCutGeneralStageForTray() {
   mouseFleePendingSide = null;
   skipNextIdle = false;
   isMouseSleeping = false;
+  mouseSleepEnteredAt = 0;
   isTransitioning = false;
 
   if (isSpeaking) {
@@ -280,6 +395,7 @@ async function setShowSpeechGate(active) {
   if (active) {
     const myGen = ++showSpeechGateGen;
     showSpeechActiveLocal = true;
+    showSpeechSince = Date.now();
     try {
       if (window.petAPI?.setShowSpeechGate) {
         await window.petAPI.setShowSpeechGate(true);
@@ -291,6 +407,7 @@ async function setShowSpeechGate(active) {
   }
 
   showSpeechActiveLocal = false;
+  showSpeechSince = 0;
   try {
     if (window.petAPI?.setShowSpeechGate) {
       await window.petAPI.setShowSpeechGate(false);
@@ -383,6 +500,10 @@ let eyeCurR = { x: EYE_IDLE.R.x, y: EYE_IDLE.R.y };
 let eyeTargetL = { x: EYE_IDLE.L.x, y: EYE_IDLE.L.y };
 let eyeTargetR = { x: EYE_IDLE.R.x, y: EYE_IDLE.R.y };
 let lookEnabled = false;
+/** Soft other-pet look stage — screen/work point until timeout or Snooze. */
+let otherPetLookUntil = 0;
+/** @type {{ x: number, y: number }|null} work-area coords */
+let otherPetLookTarget = null;
 let featuresReadyAt = 0;
 let isMovementLocked = false;
 let petSizeLevel = 1;
@@ -423,6 +544,7 @@ let dragTargetX = 0;
 let dragTargetY = 0;
 let dragFollowRaf = null;
 let lastDragWork = null;
+let lastDragActivityAt = 0;
 let isDragSettling = false;
 let dragSyncRaf = null;
 let fadeGen = 0;
@@ -435,6 +557,7 @@ let speakStartedAt = 0;
 let isPetVisible = true;
 let visibilityGen = 0;
 let isMouseSleeping = false;
+let mouseSleepEnteredAt = 0;
 let lastMouseActiveAt = Date.now();
 let lastCursorWork = null;
 let mouseFleeSide = null;
@@ -487,7 +610,7 @@ function applyPetSizeLevel(level) {
   WIN_W = Math.max(1, roundHalfUp(BASE_WIN_W * scale));
   WIN_SPEAK_H = Math.max(1, roundHalfUp(BASE_WIN_SPEAK_H * scale));
   MOUSE_NEAR_PX = Math.max(1, roundHalfUp(BASE_MOUSE_NEAR_PX * scale));
-  activeDeadzonePx = Math.max(1, roundHalfUp(BASE_DEADZONE_PX * scale));
+  activeDeadzonePx = Math.max(0, roundHalfUp(BASE_DEADZONE_PX * scale));
   lookDeadzonePx = Math.max(1, roundHalfUp(BASE_LOOK_DEADZONE_PX * scale));
   // Size N: 25 + 25*0.2*(N-1) = 25*scale — snooze multi-tap (locked or unlocked).
   snoozeTapsNeeded = Math.max(1, roundHalfUp(BASE_SNOOZE_TAPS * scale));
@@ -550,6 +673,7 @@ async function rebirthAfterSettingsChange(reason) {
   isTransitioning = false;
   speakStartedAt = 0;
   isMouseSleeping = false;
+  mouseSleepEnteredAt = 0;
   walkTarget = null;
   lastDirection = null;
   mouseFleeDidFlee = false;
@@ -745,6 +869,38 @@ function setLookTargetFromDirection(dir) {
   eyeTargetR = { x: ends.R.x, y: ends.R.y };
 }
 
+function clearOtherPetLook() {
+  otherPetLookUntil = 0;
+  otherPetLookTarget = null;
+}
+
+/**
+ * Soft other-pet look stage — look at screen point (converted to work area) for OTHER_PET_LOOK_MS.
+ * @param {number} screenCx
+ * @param {number} screenCy
+ */
+function startOtherPetLook(screenCx, screenCy) {
+  if (!Number.isFinite(screenCx) || !Number.isFinite(screenCy)) return;
+  const ox = screenCache && Number.isFinite(screenCache.x) ? screenCache.x : 0;
+  const oy = screenCache && Number.isFinite(screenCache.y) ? screenCache.y : 0;
+  otherPetLookTarget = {
+    x: screenCx - ox,
+    y: screenCy - oy,
+  };
+  otherPetLookUntil = Date.now() + OTHER_PET_LOOK_MS;
+  walkTarget = null;
+  lookEnabled = true;
+}
+
+function isOtherPetLookActive() {
+  if (!otherPetLookUntil || !otherPetLookTarget) return false;
+  if (Date.now() >= otherPetLookUntil) {
+    clearOtherPetLook();
+    return false;
+  }
+  return true;
+}
+
 function lerpEyes() {
   eyeCurL.x += (eyeTargetL.x - eyeCurL.x) * LOOK_LERP;
   eyeCurL.y += (eyeTargetL.y - eyeCurL.y) * LOOK_LERP;
@@ -758,16 +914,36 @@ function updateLookAtMouse(cursor) {
   if (!lookEnabled || currentSprite !== 'idle' || !petSvgReady) return;
   if (!areFeaturesReady()) return;
 
+  const otherLook = isOtherPetLookActive();
+
   if (
-    isSpeaking
-    || isDragFrozen
+    isDragFrozen
     || isPointerSession
     || isTransitioning
     || isMouseSleeping
     || isSnoozed
     || !isPetVisible
+    || (!otherLook && isSpeaking)
   ) {
     setLookTargetFromDirection(null);
+    lerpEyes();
+    return;
+  }
+
+  const petSize = screenCache?.petSize || WIN_PET;
+  const cx = petX + petSize * 0.5;
+  const cy = petY + petSize * 0.35;
+
+  // Soft other-pet: same direction math as mouse, target = other window center.
+  if (otherLook && otherPetLookTarget) {
+    const dx = otherPetLookTarget.x - cx;
+    const dy = otherPetLookTarget.y - cy;
+    const dist = Math.hypot(dx, dy);
+    if (dist < lookDeadzonePx) {
+      setLookTargetFromDirection(null);
+    } else {
+      setLookTargetFromDirection(getDirection(dx, dy));
+    }
     lerpEyes();
     return;
   }
@@ -778,9 +954,6 @@ function updateLookAtMouse(cursor) {
     return;
   }
 
-  const petSize = screenCache.petSize || WIN_PET;
-  const cx = petX + petSize * 0.5;
-  const cy = petY + petSize * 0.35;
   const dx = cursor.x - cx;
   const dy = cursor.y - cy;
   const dist = Math.hypot(dx, dy);
@@ -811,6 +984,16 @@ async function lookLoop() {
   }
 }
 
+function raisePetZOrderFromPet() {
+  try {
+    if (window.petAPI?.raisePetZOrder) {
+      window.petAPI.raisePetZOrder().catch((err) => logError('raisePetZOrder', err));
+    }
+  } catch (err) {
+    logError('raisePetZOrder', err);
+  }
+}
+
 function resetStuckState() {
   const now = Date.now();
 
@@ -828,12 +1011,15 @@ function resetStuckState() {
     forceIdleSprite();
   }
 
-  if (isPointerSession && !isEndingDrag && pointerSessionStartedAt > 0
-    && now - pointerSessionStartedAt > SESSION_STUCK_MS) {
-    logError('watchdog', new Error('force-reset pointer session'));
-    resetDragState();
-    bumpFadeGeneration();
-    forceIdleSprite();
+  if (isPointerSession && !isEndingDrag && pointerSessionStartedAt > 0) {
+    // Live drag: only treat as stuck if no move activity (do not kill long holds that still track).
+    const lastAct = lastDragActivityAt > 0 ? lastDragActivityAt : pointerSessionStartedAt;
+    if (now - lastAct > SESSION_STUCK_MS) {
+      logError('watchdog', new Error('force-reset pointer session'));
+      resetDragState();
+      bumpFadeGeneration();
+      forceIdleSprite();
+    }
   }
 
   if (isDragFrozen && !isPointerSession) {
@@ -845,6 +1031,7 @@ function resetStuckState() {
 
   if (isSpeaking && speakStartedAt > 0 && now - speakStartedAt > SPEAK_STUCK_MS) {
     logError('watchdog', new Error('force-reset isSpeaking'));
+    speechGeneration += 1;
     stopVoice();
     hideBubble();
     isSpeaking = false;
@@ -852,6 +1039,95 @@ function resetStuckState() {
     speakStartedAt = 0;
     bumpFadeGeneration();
     forceIdleSprite();
+  }
+
+  // shellBusy mirror sticky — main has its own timeout; unlock pet if IPC missed end.
+  if (shellBusyActive) {
+    if (!shellBusySince) shellBusySince = now;
+    if (now - shellBusySince > SHELL_BUSY_STUCK_MS) {
+      logError('watchdog', new Error('force-reset shellBusyActive'));
+      shellBusyActive = false;
+      shellBusySince = 0;
+      notifyShellReady('watchdog-shell');
+      unlockPetInput('watchdog-shell');
+      walkTarget = null;
+      forceIdleSprite();
+      raisePetZOrderFromPet();
+    }
+  } else {
+    shellBusySince = 0;
+  }
+
+  // Awareness priority / speak lock stuck (no thenQuit ack / hung force speak).
+  if (awarenessPriorityActive || awarenessSpeakLock) {
+    if (!awarenessPrioritySince) awarenessPrioritySince = now;
+    if (now - awarenessPrioritySince > AWARENESS_PRIORITY_STUCK_MS) {
+      logError('watchdog', new Error('force-reset awarenessPriority'));
+      awarenessPriorityActive = false;
+      awarenessSpeakLock = false;
+      awarenessPrioritySince = 0;
+      speechGeneration += 1;
+      isSpeaking = false;
+      isTransitioning = false;
+      speakStartedAt = 0;
+      stopVoice();
+      hideBubble();
+      bumpFadeGeneration();
+      forceIdleSprite();
+      unlockPetInput('watchdog-awareness');
+      raisePetZOrderFromPet();
+      try {
+        if (window.petAPI?.setAwarenessGate) {
+          window.petAPI.setAwarenessGate(false).catch((err) => logError('watchdog awareness-gate', err));
+        }
+      } catch (err) {
+        logError('watchdog awareness-gate', err);
+      }
+    }
+  } else {
+    awarenessPrioritySince = 0;
+  }
+
+  // Show intro gate stuck open — blocks tray/AI recovery.
+  if (showSpeechActiveLocal) {
+    if (!showSpeechSince) showSpeechSince = now;
+    if (now - showSpeechSince > SHOW_SPEECH_STUCK_MS) {
+      logError('watchdog', new Error('force-reset showSpeechGate'));
+      showSpeechGateGen += 1;
+      showSpeechActiveLocal = false;
+      showSpeechSince = 0;
+      speechGeneration += 1;
+      isSpeaking = false;
+      isTransitioning = false;
+      speakStartedAt = 0;
+      stopVoice();
+      hideBubble();
+      bumpFadeGeneration();
+      forceIdleSprite();
+      unlockPetInput('watchdog-show');
+      raisePetZOrderFromPet();
+      try {
+        if (window.petAPI?.setShowSpeechGate) {
+          window.petAPI.setShowSpeechGate(false).catch((err) => logError('watchdog show-gate', err));
+        }
+      } catch (err) {
+        logError('watchdog show-gate', err);
+      }
+    }
+  } else {
+    showSpeechSince = 0;
+  }
+
+  // Feature settle gate never opening — AI sleeps on areFeaturesReady forever.
+  if (!areFeaturesReady() && featuresReadyAt > 0 && now > featuresReadyAt + FEATURE_GATE_STUCK_MS) {
+    logError('watchdog', new Error('force-reset featureGate'));
+    featuresReadyAt = 0;
+  }
+
+  // Mouse-sleep pose stuck (cursor poll / wake path failed).
+  if (isMouseSleeping && mouseSleepEnteredAt > 0 && now - mouseSleepEnteredAt > MOUSE_SLEEP_STUCK_MS) {
+    logError('watchdog', new Error('force-reset isMouseSleeping'));
+    wakeFromMouseSleep().catch((err) => logError('watchdog wakeFromMouseSleep', err));
   }
 }
 
@@ -870,20 +1146,7 @@ function clampPetPosition(x, y) {
   const maxX = Math.max(0, screenCache.width - petSize);
   const maxY = Math.max(0, screenCache.height - petSize);
 
-  x = Math.max(0, Math.min(x, maxX));
-  y = Math.max(0, Math.min(y, maxY));
-
-  const layout = getWindowLayout();
-  const origin = windowOriginForPet(x, y);
-  if (origin.x < 0) x -= origin.x;
-  if (origin.y < 0) y -= origin.y;
-  if (origin.x + layout.w > screenCache.width) {
-    x -= origin.x + layout.w - screenCache.width;
-  }
-  if (origin.y + layout.h > screenCache.height) {
-    y -= origin.y + layout.h - screenCache.height;
-  }
-
+  // Pet footprint only — allow bubble/window chrome to overhang screen edges.
   return {
     x: Math.max(0, Math.min(x, maxX)),
     y: Math.max(0, Math.min(y, maxY)),
@@ -979,6 +1242,11 @@ function ensureDragFollowLoop() {
     dragFollowRaf = null;
     if (!isActivelyDragging && !isDragSettling) return;
 
+    // Always refresh destination from OS mouse while button held.
+    if (isActivelyDragging) {
+      sampleDragTargetFromCursor();
+    }
+
     const dx = dragTargetX - petX;
     const dy = dragTargetY - petY;
     const dist = Math.hypot(dx, dy);
@@ -988,7 +1256,7 @@ function ensureDragFollowLoop() {
       petX = snapped.x;
       petY = snapped.y;
       scheduleDragMoveSync();
-      // Keep seeking while button held — mouse may still be outside clamped bounds.
+      // Keep seeking while button held — destination may still change.
       if (isActivelyDragging) {
         dragFollowRaf = requestAnimationFrame(tick);
       }
@@ -1015,6 +1283,7 @@ function updateDragPosition(workX, workY) {
   if (!isActivelyDragging || !dragGrab) return;
 
   lastDragWork = { x: workX, y: workY };
+  lastDragActivityAt = Date.now();
   // Store unclamped mouse-derived target; clamp only when applying pet position.
   dragTargetX = workX - dragGrab.offsetX;
   dragTargetY = workY - dragGrab.offsetY;
@@ -1618,27 +1887,169 @@ function shouldAbortAi() {
 /**
  * Root click unlock: CSS cursor can show grab while flags still block beginDragSession
  * after soft-hide / snooze wake. Hover reaching #pet proves the surface is hittable.
+ * Never wipe an in-progress drag — pointerenter during moveWindow used to kill follow.
  */
 function unlockPetInput(_reason = '') {
   isPetVisible = true;
   isSnoozed = false;
   isMouseSleeping = false;
+  mouseSleepEnteredAt = 0;
   lastMouseActiveAt = Date.now();
 
-  if (isPointerSession || isDragFrozen || isEndingDrag || isActivelyDragging) {
-    cancelDragMoveSync();
-    releaseActivePointer();
-    resetDragState();
+  if (isPointerSession || isActivelyDragging || isEndingDrag || isDragSettling) {
+    return;
+  }
+
+  if (isDragFrozen) {
+    isDragFrozen = false;
+    setDraggingUi(false);
   }
 }
 
+/**
+ * CSS transform tween on #pet only (not BrowserWindow size).
+ * Resolves when end scale is reached (~0.3s) so Show/Hide can continue immediately.
+ * @param {'pet-spawn'|'pet-despawn'} className
+ */
+function playPetTween(className) {
+  return new Promise((resolve) => {
+    if (!pet) {
+      resolve();
+      return;
+    }
+    pet.classList.remove('pet-spawn', 'pet-despawn');
+    void pet.offsetWidth;
+    pet.classList.add(className);
+
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      pet.removeEventListener('animationend', onEnd);
+      clearTimeout(fallback);
+      clearTimeout(stepDone);
+      pet.classList.remove(className);
+      resolve();
+    };
+    const onEnd = (e) => {
+      if (e.target !== pet) return;
+      done();
+    };
+    pet.addEventListener('animationend', onEnd);
+    // Hit end scale (Show→1 / Hide→0.1) at 0.3s — continue without waiting past that.
+    const stepDone = setTimeout(done, PET_SPAWN_TWEEN_MS);
+    const fallback = setTimeout(done, PET_SPAWN_TWEEN_MS + 80);
+  });
+}
+
+/**
+ * Start CSS tween without awaiting animationend.
+ * @param {'pet-spawn'|'pet-despawn'} className
+ */
+function startPetTweenVisual(className) {
+  if (!pet) return;
+  pet.classList.remove('pet-spawn', 'pet-despawn');
+  void pet.offsetWidth;
+  pet.classList.add(className);
+}
+
+function pickLeavePhrase() {
+  return pickFromPoolList(localePack.leavePhrases) || null;
+}
+
+/**
+ * Tray Hide apply phases (after snooze-like prepare settle).
+ * leave 1.5s (capped speak) → despawn 0.3s (+ hide SFX) → main soft-hide.
+ * @param {{ phase?: string, gen?: number }} payload
+ */
+function applyHideSeq(payload = {}) {
+  const phase = payload.phase ? String(payload.phase) : '';
+
+  if (phase === 'leave') {
+    // Prepare already settled like Snooze; short leave only (not full speechDuration).
+    walkTarget = null;
+    skipNextIdle = false;
+    const phrase = pickLeavePhrase();
+    if (phrase) {
+      startSpeaking(phrase, { force: true, maxMs: HIDE_LEAVE_SPEAK_MS }).catch((err) => {
+        logError('hide-seq leave', err);
+      });
+    }
+    return;
+  }
+
+  if (phase === 'despawn') {
+    // End leave speak flags/bubble; start hide SFX with despawn tween (not after soft-hide).
+    speechGeneration += 1;
+    isSpeaking = false;
+    speakStartedAt = 0;
+    try {
+      hideBubble();
+    } catch (_) { /* ignore */ }
+    hideSfxStartedAtDespawn = true;
+    playSfx(sfxHide);
+    startPetTweenVisual('pet-despawn');
+    if (pet) {
+      setTimeout(() => {
+        pet.classList.remove('pet-despawn');
+        pet.style.transform = 'scale(0.1)';
+      }, PET_SPAWN_TWEEN_MS);
+    }
+  }
+}
+
+/** Sync Electron ignore-mouse forward for bubble / transparent click-through. */
+function syncMouseForwardIgnore() {
+  if (!isPetVisible || isSnoozed) return;
+  try {
+    if (window.petAPI?.setIgnoreMouseForward) {
+      if (isPointerSession || isActivelyDragging || isEndingDrag || isDragSettling) {
+        window.petAPI.setIgnoreMouseForward(false);
+        return;
+      }
+      window.petAPI.setIgnoreMouseForward(!mouseOverPet);
+    }
+  } catch (err) {
+    logError('syncMouseForwardIgnore', err);
+  }
+}
+
+/** Backup while button held: read OS cursor → refresh dragTarget. */
+function sampleDragTargetFromCursor() {
+  if (!isActivelyDragging || !dragGrab || !window.petAPI?.getCursorPos) return;
+  window.petAPI.getCursorPos().then((pos) => {
+    if (!isActivelyDragging || !dragGrab || !pos) return;
+    const ox = screenCache && Number.isFinite(screenCache.x) ? screenCache.x : 0;
+    const oy = screenCache && Number.isFinite(screenCache.y) ? screenCache.y : 0;
+    const workX = Number(pos.x) - ox;
+    const workY = Number(pos.y) - oy;
+    if (!Number.isFinite(workX) || !Number.isFinite(workY)) return;
+    lastDragWork = { x: workX, y: workY };
+    lastDragActivityAt = Date.now();
+    dragTargetX = workX - dragGrab.offsetX;
+    dragTargetY = workY - dragGrab.offsetY;
+  }).catch(() => { /* ignore */ });
+}
+
+function setMouseOverPet(over) {
+  const next = !!over;
+  if (next === mouseOverPet) return;
+  mouseOverPet = next;
+  syncMouseForwardIgnore();
+}
+
 async function pausePet() {
-  // Soft-hide stages: stop walk / speech / SFX. Window stays alive (opacity handled in main).
+  // Soft-hide stages: stop walk / speech. Window stays alive (opacity handled in main).
   await hardResetStagesForTrayPipe();
   const gen = ++visibilityGen;
   isPetVisible = false;
   beginFeatureGate();
-  playSfx(sfxHide);
+  // Tray Hide: SFX already started at despawn tween. Snooze / immediate: play here.
+  if (hideSfxStartedAtDespawn) {
+    hideSfxStartedAtDespawn = false;
+  } else {
+    playSfx(sfxHide);
+  }
 
   dragReleaseGen += 1;
   speechGeneration += 1;
@@ -1646,9 +2057,14 @@ async function pausePet() {
   isTransitioning = false;
   speakStartedAt = 0;
   isMouseSleeping = false;
+  mouseSleepEnteredAt = 0;
   stopVoice();
   hideBubble();
   bumpFadeGeneration();
+  if (pet) {
+    pet.classList.remove('pet-spawn', 'pet-despawn');
+    pet.style.transform = '';
+  }
 
   if (isPointerSession || isDragFrozen) {
     await cancelPointerSessionQuiet();
@@ -1694,6 +2110,10 @@ async function resumePet() {
   bumpFadeGeneration();
   forceIdleSprite();
   resetSnoozeTaps();
+  if (pet) {
+    pet.classList.remove('pet-spawn', 'pet-despawn');
+    pet.style.transform = 'scale(0.1)';
+  }
 
   try {
     await refreshScreenSize();
@@ -1717,6 +2137,22 @@ async function resumePet() {
     }
     if (gen === visibilityGen) unlockPetInput('resumePet-done');
 
+    // Spawn visual — main also sends pet-shell-fx spawn; never block shell-ready on CSS end.
+    if (gen === visibilityGen) {
+      try {
+        if (pet) pet.style.transform = 'scale(0.1)';
+        startPetTweenVisual('pet-spawn');
+        await sleep(PET_SPAWN_TWEEN_MS);
+        if (pet) {
+          pet.classList.remove('pet-spawn', 'pet-despawn');
+          pet.style.transform = '';
+        }
+      } catch (err) {
+        logError('playPetSpawnTween', err);
+      }
+    }
+    if (gen === visibilityGen) syncMouseForwardIgnore();
+
     // Close shellBusy (Tray pipe) before Show talk — talk is Stage other.
     if (gen === visibilityGen) notifyShellReady('resumePet');
 
@@ -1730,6 +2166,7 @@ async function resumePet() {
   } catch (err) {
     logError('resumePet', err);
     unlockPetInput('resumePet-error');
+    if (pet) pet.style.transform = '';
     notifyShellReady('resumePet-error');
   }
 }
@@ -1769,7 +2206,11 @@ async function maybeSpeakOnSoftShow(gen) {
   const gateGen = await setShowSpeechGate(true);
   try {
     for (let i = 0; i < count; i += 1) {
+      // Snooze (or other) finished the gate early — treat intro as done.
+      if (gateGen !== showSpeechGateGen) return;
+
       const ready = await waitSoftShowSpeakSlot(gen);
+      if (gateGen !== showSpeechGateGen) return;
       if (!ready || gen !== visibilityGen || !isPetVisible || isSnoozed) return;
       if (awarenessPriorityActive) return;
 
@@ -1786,9 +2227,21 @@ async function maybeSpeakOnSoftShow(gen) {
       const phrase = pickShowSpeechPhrase(i);
       if (!phrase) continue;
       await startSpeaking(phrase, { force: true });
+      if (gateGen !== showSpeechGateGen || isSnoozed) return;
+
+      // Multi-tap toward snooze: pause next intro lines until taps clear or snooze finishes.
+      while (gateGen === showSpeechGateGen && !isSnoozed) {
+        if (snoozeTapCount <= 0) break;
+        if (Date.now() - lastSnoozeTapAt > SNOOZE_TAP_GAP_MS) {
+          snoozeTapCount = 0;
+          break;
+        }
+        await sleep(50);
+      }
+      if (gateGen !== showSpeechGateGen || isSnoozed) return;
     }
   } finally {
-    // Only clear if we still own the gate (Tray hard-reset / newer Show may have bumped gen).
+    // Only clear if we still own the gate (Snooze / Tray hard-reset / newer Show may have bumped gen).
     if (gateGen === showSpeechGateGen) {
       await setShowSpeechGate(false);
     }
@@ -2343,10 +2796,13 @@ function speechDuration(text) {
 
 /**
  * @param {string} text
- * @param {{ force?: boolean }} [options] force = awareness priority (ignore drag/walk locks)
+ * @param {{ force?: boolean, maxMs?: number }} [options]
+ *   force = awareness / hide leave (ignore drag/walk locks)
+ *   maxMs = cap speak+rhythm length (Hide leave uses 1.5s; default = full speechDuration)
  */
 async function startSpeaking(text, options = {}) {
   const force = !!options.force;
+  const maxMs = Number(options.maxMs);
   if (!force && (isSpeaking || isDragFrozen)) return;
 
   if (force && isSpeaking) {
@@ -2375,7 +2831,10 @@ async function startSpeaking(text, options = {}) {
     }
 
     showBubble(text, { force });
-    const duration = speechDuration(text);
+    let duration = speechDuration(text);
+    if (Number.isFinite(maxMs) && maxMs > 0) {
+      duration = Math.min(duration, maxMs);
+    }
     const pattern = randomRhythm();
 
     await Promise.all([
@@ -2418,6 +2877,7 @@ async function enterMouseSleep() {
   if (isMouseSleeping || isSnoozed || !isPetVisible) return;
 
   isMouseSleeping = true;
+  mouseSleepEnteredAt = Date.now();
   dragReleaseGen += 1;
   speechGeneration += 1;
   isSpeaking = false;
@@ -2439,6 +2899,7 @@ async function wakeFromMouseSleep() {
   if (!isMouseSleeping) return;
 
   isMouseSleeping = false;
+  mouseSleepEnteredAt = 0;
   lastMouseActiveAt = Date.now();
   bumpFadeGeneration();
 
@@ -2496,6 +2957,39 @@ async function mouseWatchLoop() {
   }
 }
 
+/** Soft app-catch: main holds pending; pet delivers when Stage other is idle. */
+let awarenessSoftPending = false;
+
+function canDeliverDeferredAwareness() {
+  if (!awarenessSoftPending) return false;
+  if (!isPetVisible || isSnoozed) return false;
+  if (showSpeechActiveLocal || shellBusyActive) return false;
+  if (awarenessPriorityActive || awarenessSpeakLock) return false;
+  if (isSpeaking || isTransitioning) return false;
+  if (isPointerSession || isDragFrozen || isActivelyDragging || isEndingDrag || isDragSettling) {
+    return false;
+  }
+  if (walkTarget) return false;
+  if (!areFeaturesReady()) return false;
+  if (currentSprite !== 'idle' && currentSprite !== 'sleep') return false;
+  return true;
+}
+
+async function tryDeliverDeferredAwareness() {
+  if (!canDeliverDeferredAwareness()) return;
+  awarenessSoftPending = false;
+  try {
+    const result = window.petAPI?.awarenessIdleReady
+      ? await window.petAPI.awarenessIdleReady()
+      : 'empty';
+    // Main still holding slot (Show / speaking) — retry later.
+    if (result === 'busy' || result === false) awarenessSoftPending = true;
+  } catch (err) {
+    awarenessSoftPending = true;
+    logError('tryDeliverDeferredAwareness', err);
+  }
+}
+
 async function aiLoop() {
   aiRunning = true;
   scheduleNextWarp();
@@ -2518,8 +3012,19 @@ async function aiLoop() {
 
     resetStuckState();
 
+    // Soft Awareness (app-catch): wait for idle stage, then play one latest line.
     try {
-      if (isMovementLocked) {
+      await tryDeliverDeferredAwareness();
+    } catch (err) {
+      logError('aiLoop deferred awareness', err);
+    }
+    if (isSpeaking || awarenessPriorityActive || awarenessSpeakLock) {
+      await sleep(200);
+      continue;
+    }
+
+    try {
+      if (isMovementLocked || isOtherPetLookActive()) {
         walkTarget = null;
         if (currentSprite !== 'idle' && currentSprite !== 'speak') {
           setSpriteDirect('idle');
@@ -2527,6 +3032,7 @@ async function aiLoop() {
         const idleMs = randBetween(5, 10) * 1000;
         await idlePhase(idleMs);
         if (shouldAbortAi() || isSpeaking || isMovementLocked) continue;
+        if (isOtherPetLookActive()) continue;
         if (Math.random() < 0.35) {
           await startSpeaking(randomPhrase());
         }
@@ -2581,11 +3087,15 @@ async function handleSnooze(e) {
   }
 
   if (isSnoozed || !isPetVisible) return;
+  // โป๊ / load-quit — snooze must not cut critical awareness.
+  if (awarenessCriticalActive) return;
+
+  // Early flag: stop Show loop / AI before settle finishes.
+  isSnoozed = true;
 
   // Stage Snooze: interrupt other → idle, then soft-hide (existing pipe).
   await enterSnoozeSettlePath();
 
-  isSnoozed = true;
   try {
     if (window.petAPI) await window.petAPI.snooze(3 * 60 * 1000);
   } catch (err) {
@@ -2648,6 +3158,7 @@ function resetDragState() {
   activePointerId = null;
   pointerSessionStartedAt = 0;
   endingDragStartedAt = 0;
+  lastDragActivityAt = 0;
   setDraggingUi(false);
   lastSync = { x: -1, y: -1, w: -1, h: -1 };
 }
@@ -2684,8 +3195,8 @@ function releaseActivePointer() {
 }
 
 function beginDragSession(e) {
-  // Shell loading or awareness — drop clicks until ready.
-  if (shellBusyActive || awarenessPriorityActive || awarenessSpeakLock) return;
+  // Shell loading, hide-armed, or critical awareness — drop clicks.
+  if (shellBusyActive || awarenessCriticalActive) return;
 
   // Hover/cursor already reached #pet — unlock flags that may still block after wake.
   unlockPetInput('beginDragSession');
@@ -2703,6 +3214,7 @@ function beginDragSession(e) {
 
   isPointerSession = true;
   pointerSessionStartedAt = Date.now();
+  lastDragActivityAt = Date.now();
   pointerDownWork = pointerToWorkCoords(e);
   dragDownPos = { petX, petY };
   activePointerId = e.pointerId;
@@ -2739,6 +3251,9 @@ function startActiveDrag() {
   forceIdleSprite();
   setDraggingUi(true);
   signalClickUx('press');
+  // Must accept mouse for whole drag — never click-through mid-seek.
+  mouseOverPet = true;
+  syncMouseForwardIgnore();
 
   if (window.petAPI?.enterDragMode) {
     window.petAPI.enterDragMode().catch((err) => logError('enterDragMode', err));
@@ -2835,6 +3350,7 @@ async function finishDragSession() {
     pointerDownWork = null;
     lastDragWork = null;
     pointerSessionStartedAt = 0;
+    syncMouseForwardIgnore();
 
     if (wasTap) {
       lastSync = { x: -1, y: -1, w: -1, h: -1 };
@@ -2893,8 +3409,20 @@ async function onPointerUp(e) {
 
 pet.addEventListener('pointerenter', () => {
   // CSS cursor can change while click flags stay locked — heal as soon as hover hits.
+  setMouseOverPet(true);
   unlockPetInput('pointerenter');
 });
+
+pet.addEventListener('pointerleave', () => {
+  setMouseOverPet(false);
+});
+
+// Forwarded mousemove (ignore+forward) still reaches renderer — keep #pet hit state accurate.
+window.addEventListener('mousemove', (e) => {
+  if (!isPetVisible || isSnoozed) return;
+  const over = !!(e.target && e.target.closest && e.target.closest('#pet'));
+  setMouseOverPet(over);
+}, true);
 
 pet.addEventListener('pointerdown', (e) => {
   // Middle-click = quit process for real.
@@ -3046,6 +3574,7 @@ async function init() {
     if (window.petAPI?.onShellBusy) {
       window.petAPI.onShellBusy((busy) => {
         shellBusyActive = !!busy;
+        shellBusySince = shellBusyActive ? Date.now() : 0;
         if (shellBusyActive) {
           clearClicksForShellBusy().catch((err) => logError('clearClicksForShellBusy', err));
         }
@@ -3053,8 +3582,18 @@ async function init() {
     }
 
     if (window.petAPI?.onTrayPrepare) {
-      window.petAPI.onTrayPrepare(() => {
-        settleForTrayPrepare().catch((err) => logError('settleForTrayPrepare', err));
+      window.petAPI.onTrayPrepare((payload) => {
+        settleForTrayPrepare(payload || {}).catch((err) => logError('settleForTrayPrepare', err));
+      });
+    }
+
+    if (window.petAPI?.onHideSeq) {
+      window.petAPI.onHideSeq((payload) => {
+        try {
+          applyHideSeq(payload || {});
+        } catch (err) {
+          logError('applyHideSeq', err);
+        }
       });
     }
 
@@ -3068,6 +3607,12 @@ async function init() {
     }
 
     // --- App Awareness (feature 7) IPC ---
+    if (window.petAPI?.onAwarenessPending) {
+      window.petAPI.onAwarenessPending(() => {
+        awarenessSoftPending = true;
+        tryDeliverDeferredAwareness().catch((err) => logError('awareness-pending deliver', err));
+      });
+    }
     if (window.petAPI?.onAwarenessSpeak) {
       window.petAPI.onAwarenessSpeak((payload) => {
         awarenessHandleSpeak(payload).catch((err) => logError('awarenessHandleSpeak', err));
@@ -3104,11 +3649,15 @@ init().catch((err) => logError('init', err));
 // =============================================================================
 // App Awareness (feature 7) — HIGHEST priority speak pipe + quit.
 // Overrides walk / drag / click / hide. Phrases chosen in main `awareness.js`.
+// Priority: porn/critical > Snooze > Show / soft app-catch > other.
 // =============================================================================
 
 let awarenessSpeakLock = false;
 let awarenessPriorityActive = false;
+let awarenessPrioritySince = 0;
 let awarenessPriorityToken = 0;
+/** Porn chain / load-quit — blocks Snooze and pointer. Soft app-catch leaves this false. */
+let awarenessCriticalActive = false;
 
 function awarenessForceQuit() {
   try {
@@ -3121,6 +3670,7 @@ function awarenessForceQuit() {
 /** Stop walk/drag/AI toys so awareness lines 1→2→3 can always run. */
 async function seizeForAwareness() {
   awarenessPriorityActive = true;
+  awarenessPrioritySince = Date.now();
   try {
     if (window.petAPI?.setAwarenessGate) {
       await window.petAPI.setAwarenessGate(true);
@@ -3132,6 +3682,7 @@ async function seizeForAwareness() {
   skipNextIdle = false;
   lastDirection = null;
   isMouseSleeping = false;
+  mouseSleepEnteredAt = 0;
   isTransitioning = false;
 
   dragReleaseGen += 1;
@@ -3161,13 +3712,17 @@ async function seizeForAwareness() {
 }
 
 /**
- * Forced awareness line. Always completes (even if pet soft-hidden — bubble may be invisible).
- * @param {{ text?: string, thenQuit?: boolean, keepPriority?: boolean }} payload
+ * Awareness speak. Critical (porn / load-quit) always runs — even if soft-hidden.
+ * Soft app-catch: refuse while soft-hidden / snoozed (main also holds pending until Show).
+ * Soft other-pet may include lookCx/lookCy (screen) → look stage + speak.
+ * @param {{ text?: string, thenQuit?: boolean, keepPriority?: boolean, lookCx?: number, lookCy?: number, family?: string }} payload
  */
 async function awarenessHandleSpeak(payload) {
   const text = String(payload?.text || '').trim();
   const thenQuit = !!payload?.thenQuit;
   const keepPriority = !!payload?.keepPriority;
+  // thenQuit / keepPriority = porn rounds or load-leave — Snooze must not cut.
+  const critical = thenQuit || keepPriority;
 
   if (!text) {
     if (thenQuit) awarenessForceQuit();
@@ -3181,6 +3736,23 @@ async function awarenessHandleSpeak(payload) {
     return;
   }
 
+  // Soft catch after Hide — do not speak invisible; ack so main unlocks (pending kept in main).
+  if (!critical && (!isPetVisible || isSnoozed)) {
+    try {
+      if (window.petAPI?.awarenessSpeechDone) {
+        await window.petAPI.awarenessSpeechDone(false);
+      }
+    } catch (err) {
+      logError('awarenessSpeechDone soft-hidden', err);
+    }
+    return;
+  }
+
+  // Soft other-pet: arm look stage before seize/speak (same soft priority as app-catch).
+  if (!critical && Number.isFinite(payload?.lookCx) && Number.isFinite(payload?.lookCy)) {
+    startOtherPetLook(Number(payload.lookCx), Number(payload.lookCy));
+  }
+
   // Serialize awareness lines — wait for prior forced speak to finish (no skip).
   const waitStart = Date.now();
   while (awarenessSpeakLock && Date.now() - waitStart < 20000) {
@@ -3188,6 +3760,7 @@ async function awarenessHandleSpeak(payload) {
   }
   awarenessSpeakLock = true;
   ++awarenessPriorityToken;
+  awarenessCriticalActive = critical;
 
   try {
     await seizeForAwareness();
@@ -3205,6 +3778,8 @@ async function awarenessHandleSpeak(payload) {
     }
     if (thenQuit) {
       awarenessPriorityActive = false;
+      awarenessPrioritySince = 0;
+      awarenessCriticalActive = false;
       try {
         if (window.petAPI?.setAwarenessGate) {
           await window.petAPI.setAwarenessGate(false);
@@ -3214,8 +3789,10 @@ async function awarenessHandleSpeak(payload) {
       }
       awarenessForceQuit();
     } else if (keepPriority) {
-      // Hold lock for chained rounds 1→2→3
+      // Hold lock for chained rounds 1→2→3 — refresh stuck clock per line.
       awarenessPriorityActive = true;
+      awarenessPrioritySince = Date.now();
+      awarenessCriticalActive = true;
       try {
         if (window.petAPI?.setAwarenessGate) {
           await window.petAPI.setAwarenessGate(true);
@@ -3225,6 +3802,8 @@ async function awarenessHandleSpeak(payload) {
       }
     } else {
       awarenessPriorityActive = false;
+      awarenessPrioritySince = 0;
+      awarenessCriticalActive = false;
       try {
         if (window.petAPI?.setAwarenessGate) {
           await window.petAPI.setAwarenessGate(false);

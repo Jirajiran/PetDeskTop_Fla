@@ -41,6 +41,22 @@ let petVisuallyHidden = false;
 /** Set once at boot — never re-toggled on show/hide (toggling pulls other apps forward on Windows). */
 let alwaysOnTopBooted = false;
 let mouseAcceptTimers = [];
+/**
+ * When pet is visible: true = ignore hits but forward mousemove (bubble/transparent click-through);
+ * false = accept hits on #pet. Soft-hide uses full ignore (no forward) and ignores this flag.
+ */
+let mouseForwardIgnore = false;
+/** Tray Hide after snooze-like settle: leave → despawn → soft-hide. Main clock. */
+const HIDE_LEAVE_MS = 1500;
+const HIDE_DESPAWN_MS = 300;
+let hideSeqGen = 0;
+let hideSeqTimer = null;
+/**
+ * Show/Hide: shellBusy taken at prepare start (not only at apply) so caption /
+ * soft awareness cannot interleave the prepare gap. Cleared when apply starts
+ * or when prepare is dropped/rejected.
+ */
+let trayPrepareOwnsShell = false;
 /** Tray lock: pet stays put (no AI pathing); drag still allowed. */
 let movementLocked = false;
 /** Tray Size 1..8 — scale = 1 + (level-1)*0.2 */
@@ -281,6 +297,7 @@ function clearMouseAcceptTimers() {
 /**
  * Hard-clear Windows stuck setIgnoreMouseEvents(true).
  * Order matters: opacity must be visible-ish before accept-mouse sticks on some builds.
+ * When mouseForwardIgnore is set, re-apply forward click-through instead of full accept.
  */
 function forceAcceptMouseEvents(win) {
   if (!win || win.isDestroyed()) return;
@@ -290,6 +307,10 @@ function forceAcceptMouseEvents(win) {
     if (!win || win.isDestroyed() || petVisuallyHidden) return;
     try {
       win.setOpacity(1);
+      if (mouseForwardIgnore) {
+        win.setIgnoreMouseEvents(true, { forward: true });
+        return;
+      }
       // Toggle sequence — single false is often ignored after a long ignore=true.
       win.setIgnoreMouseEvents(false);
       win.setIgnoreMouseEvents(true);
@@ -304,6 +325,25 @@ function forceAcceptMouseEvents(win) {
   clearMouseAcceptTimers();
   for (const ms of [0, 16, 32, 50, 100, 200, 400]) {
     mouseAcceptTimers.push(setTimeout(punch, ms));
+  }
+}
+
+/**
+ * Bubble / transparent click-through while visible.
+ * Soft-hide owns full ignore — never override petVisuallyHidden.
+ */
+function applyMouseForwardIgnore(ignore, win = mainWindow) {
+  if (!win || win.isDestroyed()) return;
+  if (petVisuallyHidden) return;
+  mouseForwardIgnore = !!ignore;
+  try {
+    if (mouseForwardIgnore) {
+      win.setIgnoreMouseEvents(true, { forward: true });
+    } else {
+      win.setIgnoreMouseEvents(false);
+    }
+  } catch (err) {
+    logMain('applyMouseForwardIgnore', err);
   }
 }
 
@@ -332,18 +372,20 @@ function notifyShellBusy(busy) {
 }
 
 /** @returns {boolean} false = already loading, drop the click */
-function beginShellOp(reason) {
+function beginShellOp(reason, maxMs = SHELL_BUSY_MAX_MS) {
   if (shellBusy) {
     logMain('shellBusy drop', new Error(String(reason || 'op')));
     return false;
   }
+  clearCaptionSoftHideShowTimers();
   shellBusy = true;
   shellBusyStartedAt = Date.now();
   const token = ++shellBusyToken;
   clearShellBusyTimers();
+  const limit = Math.max(SHELL_BUSY_MIN_MS, Number(maxMs) || SHELL_BUSY_MAX_MS);
   shellBusyTimer = setTimeout(() => {
     endShellOp(token, 'timeout');
-  }, SHELL_BUSY_MAX_MS);
+  }, limit);
   notifyShellBusy(true);
   if (tray) updateTrayMenu();
   return true;
@@ -357,6 +399,7 @@ function endShellOp(token, why, detail = '') {
     if (token != null && token !== shellBusyToken) return;
     settleSettingsPersist(why, detail);
     shellBusy = false;
+    trayPrepareOwnsShell = false;
     clearShellBusyTimers();
     notifyShellBusy(false);
     if (tray) updateTrayMenu();
@@ -372,6 +415,29 @@ function endShellOp(token, why, detail = '') {
   } else {
     finish();
   }
+}
+
+/** Extend max timeout of an in-flight shell op (prepare → apply handoff). */
+function refreshShellBusyTimeout(maxMs) {
+  if (!shellBusy) return;
+  clearShellBusyTimers();
+  const token = shellBusyToken;
+  const limit = Math.max(SHELL_BUSY_MIN_MS, Number(maxMs) || SHELL_BUSY_MAX_MS);
+  shellBusyTimer = setTimeout(() => {
+    endShellOp(token, 'timeout');
+  }, limit);
+}
+
+/**
+ * Begin shell if free; if already exclusive from show/hide prepare, refresh timeout only.
+ * @returns {boolean}
+ */
+function ensureShellOp(reason, maxMs = SHELL_BUSY_MAX_MS) {
+  if (shellBusy) {
+    refreshShellBusyTimeout(maxMs);
+    return true;
+  }
+  return beginShellOp(reason, maxMs);
 }
 
 /** Commit Size/locale only after successful rebootstrap; else rollback — no disk write of failed value. */
@@ -471,6 +537,20 @@ function clearTrayPrepareTimer() {
  * - Stage other → enqueue; pet hard-cuts walk/casual speak then apply
  * - shellBusy → queue behind endShellOp (drain), never drop mid-apply intent
  */
+/**
+ * Hybrid external gate:
+ * - hide: refuse only porn/critical awareness (may cut Show + soft awareness)
+ * - show / other: refuse Show intro + any awareness stage
+ */
+function isCriticalAwarenessProtected() {
+  try {
+    return typeof awareness.isCriticalAwarenessActive === 'function'
+      && !!awareness.isCriticalAwarenessActive();
+  } catch (_) {
+    return false;
+  }
+}
+
 function isAwarenessProtected() {
   if (awarenessGateActive) return true;
   try {
@@ -485,14 +565,22 @@ function isProtectedExternalStage() {
   return !!showSpeechActive || isAwarenessProtected();
 }
 
+/** @returns {boolean} true = refuse this op at the gate */
+function isTrayOpBlocked(op) {
+  if (!op || !op.kind) return true;
+  if (op.kind === 'hide') {
+    return isCriticalAwarenessProtected();
+  }
+  return isProtectedExternalStage();
+}
+
 /**
  * Only entry for external tray show/hide/size/locale.
  * @returns {boolean} true if accepted into pipe/queue
  */
 function acceptExternalTrayOp(op) {
   if (!op || !op.kind) return false;
-  if (isProtectedExternalStage()) {
-    // Refuse: Show/Awareness — ignore input entirely (no pending, no tentative).
+  if (isTrayOpBlocked(op)) {
     closeTrayMenuIfOpen();
     return false;
   }
@@ -503,10 +591,12 @@ function acceptExternalTrayOp(op) {
 /**
  * Tray show/hide/size/locale — one pending slot (latest wins) for Stage other / shell drain.
  * Soft pipe after prepare: pause → apply → resume → Show. Relaunch = manual Tray only.
+ * Hide settles like Snooze then leave phrase + despawn then soft-hide.
+ * Show/Hide take shellBusy at prepare start (exclusive before settle).
  */
 function enqueueTrayOp(op) {
   if (!op || !op.kind) return;
-  if (isProtectedExternalStage()) {
+  if (isTrayOpBlocked(op)) {
     dropPendingTrayOp();
     return;
   }
@@ -525,9 +615,24 @@ function enqueueTrayOp(op) {
 /** Start prepare when there is a pending op and shell is free. */
 function beginTrayPrepareIfNeeded() {
   if (!pendingTrayOp || shellBusy || trayPrepareWaiting) return;
-  if (isProtectedExternalStage()) {
+  if (isTrayOpBlocked(pendingTrayOp)) {
     dropPendingTrayOp();
     return;
+  }
+
+  const kind = pendingTrayOp.kind;
+  const exclusive = kind === 'show' || kind === 'hide';
+
+  // Exclusive BEFORE prepare so caption blink / soft awareness cannot race the settle gap.
+  if (exclusive) {
+    const prepareBudget = kind === 'hide' ? 4000 : 8000;
+    const applyBudget = kind === 'hide'
+      ? HIDE_LEAVE_MS + HIDE_DESPAWN_MS + 2500
+      : SHELL_BUSY_MAX_MS;
+    if (!beginShellOp(`${kind}-prepare`, prepareBudget + applyBudget)) {
+      return;
+    }
+    trayPrepareOwnsShell = true;
   }
 
   trayPrepareWaiting = true;
@@ -538,58 +643,92 @@ function beginTrayPrepareIfNeeded() {
     const run = pendingTrayOp;
     pendingTrayOp = null;
     trayPrepareWaiting = false;
+    trayPrepareOwnsShell = false;
     executeTrayOp(run);
     if (tray) updateTrayMenu();
     return;
   }
 
   try {
-    mainWindow.webContents.send('pet-tray-prepare');
+    mainWindow.webContents.send('pet-tray-prepare', { kind });
   } catch (err) {
     logMain('pet-tray-prepare', err);
     dropPendingTrayOp();
     return;
   }
-  // General stage hard-cut should finish fast; timeout = stuck → refuse leftover.
+  // Hide = full snooze settle (async IPC); allow time then force apply. Other: longer then drop.
+  const prepareMs = kind === 'hide' ? 4000 : 8000;
+  const prepareKind = kind;
   trayPrepareTimer = setTimeout(() => {
     trayPrepareTimer = null;
     if (!trayPrepareWaiting) return;
-    logMain('tray prepare timeout', new Error('general hard-cut exceeded'));
+    if (pendingTrayOp && pendingTrayOp.kind === 'hide') {
+      console.warn(`[${APP_NAME}] tray prepare slow — force hide apply`);
+      onTrayIdleReady();
+      return;
+    }
+    console.warn(`[${APP_NAME}] tray prepare timeout — drop ${prepareKind || 'op'}`);
     dropPendingTrayOp();
-  }, 8000);
+  }, prepareMs);
+}
+
+/** Release shell taken at prepare if apply never started. */
+function releaseTrayPrepareShell(why) {
+  if (!trayPrepareOwnsShell) return;
+  trayPrepareOwnsShell = false;
+  if (shellBusy) {
+    endShellOp(shellBusyToken, why || 'prepare-drop');
+  }
 }
 
 function dropPendingTrayOp() {
   clearTrayPrepareTimer();
+  const releaseShell = trayPrepareWaiting && trayPrepareOwnsShell;
   trayPrepareWaiting = false;
   pendingTrayOp = null;
+  if (releaseShell) {
+    releaseTrayPrepareShell('prepare-drop');
+  }
   if (tray) updateTrayMenu();
 }
 
 function onTrayIdleReady() {
   clearTrayPrepareTimer();
-  trayPrepareWaiting = false;
   if (!pendingTrayOp) {
+    trayPrepareWaiting = false;
+    // Prepare finished with nothing to apply — unlock if we owned shell.
+    releaseTrayPrepareShell('prepare-empty');
     if (tray) updateTrayMenu();
     return;
   }
-  if (isProtectedExternalStage()) {
-    // Show/Awareness seized during prepare — refuse stale value.
+  if (isTrayOpBlocked(pendingTrayOp)) {
+    // Still in prepare (waiting true) so dropPending releases owned shell.
     dropPendingTrayOp();
     return;
   }
-  if (shellBusy) {
-    // Keep pending — endShellOp will beginTrayPrepareIfNeeded.
+  // shellBusy from our prepare exclusive is expected — hand off to apply (same token).
+  if (shellBusy && !trayPrepareOwnsShell) {
+    // Busy from unrelated op — keep pending for endShellOp drain.
+    trayPrepareWaiting = false;
     if (tray) updateTrayMenu();
     return;
   }
 
   const op = pendingTrayOp;
   pendingTrayOp = null;
+  trayPrepareWaiting = false;
+  // Apply continues the same shellBusy; no longer "prepare-owned" for reject cleanup.
+  trayPrepareOwnsShell = false;
   const ok = executeTrayOp(op);
   if (!ok && tray) updateTrayMenu();
-  // If execute failed to begin shell, allow another queued op later.
-  if (!ok) beginTrayPrepareIfNeeded();
+  // If execute failed, unlock shell and allow another queued op.
+  if (!ok) {
+    if (shellBusy) {
+      endShellOp(shellBusyToken, 'apply-fail');
+    } else {
+      beginTrayPrepareIfNeeded();
+    }
+  }
 }
 
 function onTrayIdleReject() {
@@ -643,6 +782,7 @@ function bootAlwaysOnTop(win) {
 function applyHiddenVisual(win) {
   if (!win || win.isDestroyed()) return;
   clearMouseAcceptTimers();
+  mouseForwardIgnore = false;
   win.setSkipTaskbar(true);
   win.setFocusable(false);
   win.setIgnoreMouseEvents(true);
@@ -680,6 +820,21 @@ function restorePetWindowShell(win) {
   }
   // Do NOT blur here — blur re-enters focus/blur handlers and can freeze mid locale/size pipe.
   // alwaysOnTop is boot-only — never re-applied here.
+}
+
+/**
+ * Raise pet in z-order without toggling alwaysOnTop (boot-only).
+ * Used after stuck recovery so Re does not send the window to the back.
+ */
+function raisePetZOrder(win = mainWindow) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    if (typeof win.moveTop === 'function') {
+      win.moveTop();
+    }
+  } catch (err) {
+    logMain('raisePetZOrder', err);
+  }
 }
 
 /** Suppress focus/blur storm while we strip caption or reassert. */
@@ -722,8 +877,10 @@ function scheduleCaptionStripOnly() {
 /**
  * After tray click, sticky Windows caption clears when user hide→show.
  * Do the same visually when safe — no shellBusy, no pet-visibility IPC, no Show speech.
+ * Pass 1 soon after menu close; pass 2 ~3s later if still safe.
  */
 let captionSoftRefreshTimer = null;
+let captionSoftRefreshSecondTimer = null;
 let captionSoftRefreshRunning = false;
 
 function canCaptionSoftHideShow() {
@@ -735,15 +892,29 @@ function canCaptionSoftHideShow() {
   return true;
 }
 
-function scheduleCaptionSoftHideShow() {
+function clearCaptionSoftHideShowTimers() {
   if (captionSoftRefreshTimer) {
     clearTimeout(captionSoftRefreshTimer);
     captionSoftRefreshTimer = null;
   }
-  // Let menu dismiss + OS activate settle, then micro hide→show.
+  if (captionSoftRefreshSecondTimer) {
+    clearTimeout(captionSoftRefreshSecondTimer);
+    captionSoftRefreshSecondTimer = null;
+  }
+}
+
+function scheduleCaptionSoftHideShow() {
+  clearCaptionSoftHideShowTimers();
+  // Let menu dismiss + OS activate settle, then micro hide→show (pass 1).
   captionSoftRefreshTimer = setTimeout(() => {
     captionSoftRefreshTimer = null;
     runCaptionSoftHideShow();
+    // Pass 2: second blink ~3s later if still safe (cancels if shellBusy / protected / hidden).
+    captionSoftRefreshSecondTimer = setTimeout(() => {
+      captionSoftRefreshSecondTimer = null;
+      if (!canCaptionSoftHideShow()) return;
+      runCaptionSoftHideShow();
+    }, 3000);
   }, 80);
 }
 
@@ -787,6 +958,8 @@ function runCaptionSoftHideShow() {
         restorePetWindowBounds(mainWindow);
       });
       scheduleCaptionStripOnly();
+      // Soft blink can drop z-order — raise without toggling alwaysOnTop.
+      raisePetZOrder(mainWindow);
     } catch (err) {
       logMain('caption soft show', err);
       try {
@@ -921,11 +1094,14 @@ function windowBoundsToPet(bounds, winW, winH, anchor = 'bottom') {
   return { petX, petY };
 }
 
-function clampWindowToWorkArea(bounds, area) {
-  let { x, y, width, height } = bounds;
-  x = Math.max(0, Math.min(x, area.width - width));
-  y = Math.max(0, Math.min(y, area.height - height));
-  return { x, y, width, height };
+function clampWindowToWorkArea(bounds, area, anchor = 'bottom') {
+  // Keep pet footprint inside work area; allow bubble/window chrome to overhang edges.
+  const pet = windowBoundsToPet(bounds, bounds.width, bounds.height, anchor);
+  const maxX = Math.max(0, area.width - PET_SIZE);
+  const maxY = Math.max(0, area.height - PET_SIZE);
+  const petX = Math.max(0, Math.min(pet.petX, maxX));
+  const petY = Math.max(0, Math.min(pet.petY, maxY));
+  return petToWindowBounds(petX, petY, bounds.width, bounds.height, anchor);
 }
 
 function movePetWindow(win, petX, petY, winW, winH, anchor = 'bottom') {
@@ -934,7 +1110,8 @@ function movePetWindow(win, petX, petY, winW, winH, anchor = 'bottom') {
   const area = getWorkArea();
   const bounds = clampWindowToWorkArea(
     petToWindowBounds(petX, petY, winW, winH, anchor),
-    area
+    area,
+    anchor || 'bottom',
   );
 
   const absX = area.x + bounds.x;
@@ -990,6 +1167,14 @@ function getWindowPetPosition(win) {
 function enterDragMode(win) {
   // Drag does not touch alwaysOnTop (boot-only).
   if (!win || win.isDestroyed()) return;
+  // Force accept mouse for whole drag — click-through would freeze dragTarget.
+  mouseForwardIgnore = false;
+  try {
+    win.setIgnoreMouseEvents(false);
+  } catch (err) {
+    logMain('enterDragMode accept mouse', err);
+  }
+  forceAcceptMouseEvents(win);
 }
 
 function exitDragMode(win) {
@@ -1009,32 +1194,104 @@ function showPetWindow() {
   acceptExternalTrayOp({ kind: 'show' });
 }
 
-/** @returns {boolean} */
-function hidePetWindowNow() {
-  if (!mainWindow || mainWindow.isDestroyed()) return false;
-  if (!beginShellOp('hide')) return false;
+function clearHideSeqTimer() {
+  if (hideSeqTimer) {
+    clearTimeout(hideSeqTimer);
+    hideSeqTimer = null;
+  }
+}
 
-  // Soft-hide: keep process + window alive; only hide visually and block hits.
+function clearHideSeq() {
+  clearHideSeqTimer();
+  hideSeqGen += 1;
+}
+
+function sendHideSeq(payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    mainWindow.webContents.send('pet-hide-seq', payload || {});
+  } catch (err) {
+    logMain('pet-hide-seq', err);
+  }
+}
+
+/** Apply soft-hide visual + pause stages (end of Hide sequence or snooze). */
+function applySoftHideVisual() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  clearCaptionSoftHideShowTimers();
   petVisuallyHidden = true;
   clearMouseAcceptTimers();
-
+  mouseForwardIgnore = false;
   if (!mainWindow.isVisible()) {
     mainWindow.showInactive();
   }
   applyHiddenVisual(mainWindow);
-  // Stages pause after visual is off (same pipe as tray hide / snooze).
   mainWindow.webContents.send('pet-visibility', false);
+}
+
+/**
+ * Soft-hide now (snooze / internal). Skips leave + despawn.
+ * @returns {boolean}
+ */
+function hidePetWindowImmediate() {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  if (!beginShellOp('hide')) return false;
+  clearHideSeq();
+  applySoftHideVisual();
+  return true;
+}
+
+/**
+ * Tray Hide after snooze-like prepare:
+ * leave 1.5s → despawn tween 0.3s → soft-hide (main clock; pet plays visuals).
+ * Shell exclusive already held from prepare when called via tray pipe.
+ * @returns {boolean}
+ */
+function hidePetWindowNow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  const maxMs = HIDE_LEAVE_MS + HIDE_DESPAWN_MS + 2500;
+  if (!ensureShellOp('hide', maxMs)) return false;
+
+  clearCaptionSoftHideShowTimers();
+  clearHideSeqTimer();
+  const gen = ++hideSeqGen;
+  const token = shellBusyToken;
+
+  sendHideSeq({ phase: 'leave', gen });
+
+  hideSeqTimer = setTimeout(() => {
+    hideSeqTimer = null;
+    if (gen !== hideSeqGen) return;
+    sendHideSeq({ phase: 'despawn', gen });
+
+    hideSeqTimer = setTimeout(() => {
+      hideSeqTimer = null;
+      if (gen !== hideSeqGen) return;
+      applySoftHideVisual();
+      // If renderer never shell-ready, force unlock busy.
+      setTimeout(() => {
+        if (shellBusy && token === shellBusyToken) {
+          endShellOp(token, 'hide-seq-force', 'hide');
+        }
+      }, 1200);
+    }, HIDE_DESPAWN_MS);
+  }, HIDE_LEAVE_MS);
+
   return true;
 }
 
 /** @returns {boolean} */
 function showPetWindowNow() {
   if (!mainWindow || mainWindow.isDestroyed()) return false;
-  if (!beginShellOp('show')) return false;
+  // Tray show already holds shell from prepare; direct/second-instance may not.
+  if (!ensureShellOp('show')) return false;
   bootShowStarted = true;
 
-  // 1) Input/visual ON first — hard clear ignore-mouse before anything else.
+  clearHideSeq();
+  clearCaptionSoftHideShowTimers();
+
   petVisuallyHidden = false;
+  mouseForwardIgnore = false;
 
   if (!mainWindow.isVisible()) {
     mainWindow.showInactive();
@@ -1044,13 +1301,9 @@ function showPetWindowNow() {
   restorePetWindowBounds(mainWindow);
   forceAcceptMouseEvents(mainWindow);
 
-  // 2) Resume stages + force unlock click flags.
   notifyPetShown();
-
-  // 3) Resolve snooze AFTER visibility/force-input.
   clearSnoozeWait();
 
-  // 4) Keep punching accept-mouse (already scheduled inside forceAcceptMouseEvents).
   setTimeout(() => {
     if (mainWindow && !mainWindow.isDestroyed() && !petVisuallyHidden) {
       reassertPetSurface(mainWindow);
@@ -1366,7 +1619,11 @@ function openTrayMenuOnce() {
   trayMenuOpen = true;
   menu.once('menu-will-close', () => {
     trayMenuOpen = false;
-    // Same idea as user hide→show clearing caption — visual-only when safe.
+    // If show/hide already took exclusive shell, do not schedule caption blink race.
+    if (shellBusy || trayPrepareWaiting) {
+      scheduleCaptionStripOnly();
+      return;
+    }
     scheduleCaptionSoftHideShow();
   });
 
@@ -1446,6 +1703,17 @@ function setupIpc() {
       restorePetWindow(win);
     } catch (err) {
       logMain('restore-window-shell', err);
+    }
+  });
+
+  ipcMain.handle('raise-pet-z-order', (event) => {
+    try {
+      const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+      raisePetZOrder(win);
+      return true;
+    } catch (err) {
+      logMain('raise-pet-z-order', err);
+      return false;
     }
   });
 
@@ -1531,8 +1799,10 @@ function setupIpc() {
   ipcMain.handle('show-speech-gate', (_event, active) => {
     showSpeechActive = !!active;
     if (showSpeechActive) {
-      // Show owns stage — refuse any queued external value.
-      dropPendingTrayOp();
+      // Show owns stage — refuse queued external except tray Hide (tier-2 cut→leave).
+      if (!pendingTrayOp || pendingTrayOp.kind !== 'hide') {
+        dropPendingTrayOp();
+      }
     }
     if (tray) updateTrayMenu();
     return true;
@@ -1541,8 +1811,10 @@ function setupIpc() {
   ipcMain.handle('awareness-gate', (_event, active) => {
     awarenessGateActive = !!active;
     if (awarenessGateActive) {
-      // Awareness owns stage (same class as Show) — refuse queued external value.
-      dropPendingTrayOp();
+      // Soft awareness: Hide may still cut; drop other queued ops.
+      if (!pendingTrayOp || pendingTrayOp.kind !== 'hide') {
+        dropPendingTrayOp();
+      }
     }
     if (tray) updateTrayMenu();
     return true;
@@ -1586,6 +1858,25 @@ function setupIpc() {
     }
   });
 
+  /** Pet idle — deliver soft app-catch pending (latest wins) from central API. */
+  ipcMain.handle('awareness-idle-ready', () => {
+    try {
+      return awareness.deliverPendingAppCatch();
+    } catch (err) {
+      logMain('awareness-idle-ready', err);
+      return 'empty';
+    }
+  });
+
+  ipcMain.handle('awareness-pending-clear', () => {
+    try {
+      awareness.clearPendingAppCatch();
+    } catch (err) {
+      logMain('awareness-pending-clear', err);
+    }
+    return true;
+  });
+
   ipcMain.handle('snooze', async (event, ms) => {
     try {
       const win = BrowserWindow.fromWebContents(event.sender);
@@ -1594,11 +1885,11 @@ function setupIpc() {
       const delay = Math.max(0, Number(ms) || 0);
 
       // Wait until shown again (timer or tray "แสดง Pet").
-      // Use Now variants — snooze already settled stages; do not re-enter prepare slot.
+      // Immediate soft-hide — snooze already settled stages; no leave phrase (tray Hide owns leave).
       await new Promise((resolve) => {
         clearSnoozeWait();
         snoozeResolve = resolve;
-        hidePetWindowNow();
+        hidePetWindowImmediate();
         snoozeTimer = setTimeout(() => {
           snoozeTimer = null;
           showPetWindowNow();
@@ -1607,6 +1898,12 @@ function setupIpc() {
     } catch (err) {
       logMain('snooze', err);
     }
+  });
+
+  /** Renderer: cursor over non-pet (bubble/transparent) → forward click-through. */
+  ipcMain.on('set-ignore-mouse-forward', (event, ignore) => {
+    const win = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+    applyMouseForwardIgnore(!!ignore, win);
   });
 }
 
@@ -1634,6 +1931,7 @@ if (gotLock) {
         app.quit();
       },
       isShowSpeechActive: () => showSpeechActive,
+      isPetVisuallyHidden: () => petVisuallyHidden,
       onExternalRefuseNeeded: () => {
         dropPendingTrayOp();
         if (tray) updateTrayMenu();

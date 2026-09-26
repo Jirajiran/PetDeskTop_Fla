@@ -28,16 +28,14 @@ Build Setup → รากโปรเจกต์: `npm run dist`
 
 ## สถานะงานตอนส่งต่อ (อัปเดตเมื่อส่งต่อ)
 
-**ล่าสุดที่ทำแล้ว (V34 — Size/ภาษา relaunch + caption soft blink)**
-- **Size / ภาษา** = จำดิสก์ → `app.relaunch()` → `app.exit(0)`
-- **แสดง / ซ่อน** = soft + Hybrid
-- หลังปิดเมนูถาด = **soft hide→show ภาพ** เมื่อปลอดภัย (เคลียร์ caption) — ไม่บท Show
+**ล่าสุดที่ทำแล้ว (V34 — Setup ship + other-pet + Hide polish)**
+- Soft awareness `other-pet`: heuristic หน้าต่างเล็ก/topmost; Look ~30s ไม่เดิน; debounce ~3 นาที
+- Hide ≈ Snooze settle + leave 1.5s + despawn; เสียงซ่อนเริ่มตอน tween; Show/Hide exclusive ก่อน prepare
+- Setup อัปเดต: `Fla_petDesktop_V34-Setup-34.0.0.exe`
 
 **ยังเปิดอยู่ (รอบถัดไปได้)**
-- ทดสอบคลิกถาดซ้ำ: แถบเทาหายหลังเมนูปิด โดยไม่ค้างท่อ / ไม่พูดแนะนำตัวซ้ำ
-- ทดสอบ Size/ภาษา relaunch ยังปกติ
-- อย่า commit `node_modules`, `win-unpacked` โดยไม่ถาม / รีบิลด์ Setup
-- Push GitHub = ผู้ใช้ทำเอง
+- ทดสอบ other-pet + Hide soft pipe บนเครื่องติดตั้ง Setup
+- ไม่ต้องถาม Setup/commit สำหรับรอบนี้ (เพิ่ง ship)
 
 ---
 
@@ -46,7 +44,7 @@ Build Setup → รากโปรเจกต์: `npm run dist`
 1. **Loading / shellBusy สำคัญสุด** สำหรับ show/hide  
 2. **Size/ภาษา = save + relaunch + exit** — ไม่ soft  
 3. **แสดง/ซ่อน = ท่อ soft** Hybrid ตาม Stage  
-4. **i18n JSON** — เรียงหมวด; Show ไม่รวมหมวดท้าย; Awareness รวมท้าย = ลา  
+4. **i18n JSON** — เรียงหมวด; Show ไม่รวมหมวดท้าย; Awareness รวมท้าย = ลา; tray Hide ใช้ leave 1 บรรทัด  
 5. **Awareness** พูดครบคิวแบบ force  
 6. **AOT boot-only**  
 7. **relaunch อย่างเดียวไม่พอ** — ต้อง exit ด้วย
@@ -64,6 +62,7 @@ Build Setup → รากโปรเจกต์: `npm run dist`
 | App awareness | `source/awareness.js` |
 | Locale packs | `source/i18n.js`, `source/i18n/*.json` |
 | IPC bridge | `source/preload.js` |
+| Pet / bubble CSS | `source/style.css` |
 
 ข้อมูลทดสอบบนเครื่องผู้ใช้:
 - Ban awareness: `%APPDATA%\fla-pet-desktop\awareness-ban.json` (ลบเพื่อรีเซ็ตทดสอบ)

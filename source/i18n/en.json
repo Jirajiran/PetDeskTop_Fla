@@ -126,6 +126,15 @@
     "telegram": ["Telegram open?", "Chatting with who?", "Got a file?", "Deep chat"],
     "vscode": ["Coding?", "Where's the bug?", "Nice focus", "Rest your eyes"],
     "chrome": ["What are you doing in Chrome?", "Browsing away?", "So many tabs", "Looking something up?"],
-    "edge": ["On Edge?", "Browsing away?", "Too many tabs?", "What are you looking at?"]
+    "edge": ["On Edge?", "Browsing away?", "Too many tabs?", "What are you looking at?"],
+    "other-pet": [
+      "Who even are you?",
+      "Not gonna talk?",
+      "Ignoring me?",
+      "Why do you only talk to yourself?",
+      "We don't know each other, huh?",
+      "We can share the desk — no need to say hi",
+      "Another one? Never seen you before"
+    ]
   }
 }

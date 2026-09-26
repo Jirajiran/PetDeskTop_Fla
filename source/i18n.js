@@ -132,11 +132,14 @@ function pickLastCategoryPhrase(seedRef) {
 /** Renderer-safe snapshot (no functions). */
 function packForRenderer() {
   const p = ensurePack();
+  const leave = getLastCategory();
   return {
     locale: currentLocale,
     meta: p.meta || {},
     categories: categories(),
     showCategories: getShowCategories(),
+    /** Last category phrases — tray Hide leave line (one pick). */
+    leavePhrases: leave && Array.isArray(leave.phrases) ? leave.phrases.slice() : [],
     pools: {
       idle: pool('idle'),
       drag: pool('drag'),

@@ -55,6 +55,8 @@ body {
   cursor: grab;
   -webkit-app-region: no-drag;
   overflow: visible;
+  transform-origin: center center;
+  will-change: transform;
 }
 
 #pet svg {
@@ -68,6 +70,29 @@ body {
 
 body.dragging #pet {
   cursor: grabbing;
+}
+
+/* Show/Hide spawn tween — #pet only (not BrowserWindow geometry).
+ * Show 0.3s: 0→0.1s 0.1→1.2, 0.1→0.3s 1.2→1 — then work continues.
+ * Hide 0.3s: 0→0.1s 1→1.2, 0.1→0.3s 1.2→0.1 — then soft-hide. */
+@keyframes pet-spawn {
+  0% { transform: scale(0.1) rotate(0deg); }
+  33.333% { transform: scale(1.2) rotate(120deg); }
+  100% { transform: scale(1) rotate(360deg); }
+}
+
+@keyframes pet-despawn {
+  0% { transform: scale(1) rotate(0deg); }
+  33.333% { transform: scale(1.2) rotate(120deg); }
+  100% { transform: scale(0.1) rotate(360deg); }
+}
+
+#pet.pet-spawn {
+  animation: pet-spawn 0.3s linear forwards;
+}
+
+#pet.pet-despawn {
+  animation: pet-despawn 0.3s linear forwards;
 }
 
 #speech-bubble {
